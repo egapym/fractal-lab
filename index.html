@@ -1,0 +1,892 @@
+<!doctype html>
+<!--
+  Original work by Bert Baron
+  Licensed under GPL-3.0
+-->
+<html lang="en" data-bs-theme="light">
+  <head>
+    <title>Fractal Lab - Interactive Mandelbrot, Buddhabrot & Custom Fractal Explorer</title>
+    <meta charset="UTF-8" />
+    <meta
+      name="description"
+      content="Explore Mandelbrot sets, Buddhabrot visualizations, and custom mathematical functions with deep zoom up to 10^1500. WebGPU-powered, multi-algorithm fractal renderer for high-resolution wallpapers and scientific exploration."
+    />
+    <meta name="robots" content="index, follow" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Fractal Lab - Interactive Mandelbrot, Buddhabrot & Custom Fractal Explorer" />
+    <meta
+      property="og:description"
+      content="Explore Mandelbrot sets, Buddhabrot visualizations, and custom mathematical functions with deep zoom up to 10^1500. WebGPU-powered, multi-algorithm fractal renderer for high-resolution wallpapers and scientific exploration."
+    />
+    <meta property="og:url" content="https://yourdomain.com" />
+    <!-- Replace with actual URL -->
+    <meta property="og:site_name" content="Fractal Lab" />
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <link href="bootstrap.min.css" rel="stylesheet" />
+  </head>
+
+  <body id="app">
+    <h1 class="site-title">Fractal Lab</h1>
+    <div id="main">
+      <div id="descripion" hidden>
+        Mobile-friendely online Mandelbrot viewer with full-screen mode, pretty deep zoom and permalinks to bookmark or
+        share.
+      </div>
+      <div id="mandelbrot">
+        <div class="canvas-wrap" id="mandelbrot-canvas-wrap">
+          <canvas id="mandelbrot-canvas"></canvas>
+          <canvas id="progress-canvas" width="20" height="20"></canvas>
+          <textarea id="debug" readonly hidden></textarea>
+          <label for="debug" hidden>Debug</label>
+          <canvas id="palette-canvas" hidden></canvas>
+          <!-- Orbit visualization overlay (pointer-events:none so mouse passes through) -->
+          <canvas id="orbit-canvas"></canvas>
+          <!-- Center crosshair shown in Julia mode -->
+          <div id="julia-crosshair" class="julia-crosshair" hidden></div>
+        </div>
+        <!-- menu-toggle lives directly in #mandelbrot so it stays put when
+                 #mandelbrot-canvas-wrap is moved into the settings preview -->
+        <button id="menu-toggle"></button>
+        <!-- Julia set canvas shown when Julia mode is active -->
+        <div id="julia-section" hidden>
+          <div class="canvas-wrap julia-canvas-wrap">
+            <canvas id="julia-canvas"></canvas>
+            <canvas id="julia-progress-canvas" width="20" height="20"></canvas>
+            <!-- Orbit visualization overlay for Julia canvas -->
+            <canvas id="julia-orbit-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+      <div id="settings">
+        <div class="container container-sm">
+          <div class="mb-2 row">
+            <div class="col col-sm-12">
+              <div class="d-flex align-items-start gap-2">
+                <div style="flex: 1">
+                  <label
+                    for="fractalType"
+                    class="col-form-label py-0 d-block"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Select fractal type"
+                    >Fractal Type</label
+                  >
+                  <select
+                    id="fractalType"
+                    class="form-select form-select-sm py-0"
+                    title="Select the fractal type or preset to render"
+                  >
+                    <option value="preset:-1" data-preset-index="-1" disabled>custom</option>
+                  </select>
+                </div>
+                <div>
+                  <label
+                    for="julia-toggle"
+                    class="col-form-label text-nowrap py-0 d-block"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Julia set mode: uses the center point of the canvas as the c parameter to render the Julia set"
+                    >Julia Set</label
+                  >
+                  <div class="d-flex align-items-center py-1">
+                    <div class="form-check form-switch m-0">
+                      <input
+                        id="julia-toggle"
+                        class="form-check-input"
+                        type="checkbox"
+                        role="switch"
+                        title="Toggle Julia set mode: renders the Julia set using the canvas center point as the c parameter"
+                      />
+                    </div>
+                    <button
+                      id="julia-reset"
+                      class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-1"
+                      title="Reset Julia canvas position and zoom to initial values"
+                      hidden
+                    >
+                      ↺
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Mandelbrot mini-preview shown in settings when Julia mode is active (fullscreen) -->
+          <div id="julia-mb-preview-wrap" class="mb-2 row" hidden>
+            <div class="col col-sm-12" id="julia-mb-preview-col">
+              <label class="col-form-label py-0" style="font-size: 0.82em; opacity: 0.7">Fractal View</label>
+              <!-- #mandelbrot-canvas-wrap is moved here when in fullscreen Julia mode -->
+            </div>
+          </div>
+          <div class="mb-2 row">
+            <div class="col col-sm-12 d-flex align-items-center">
+              <div style="flex: 1">
+                <label
+                  for="iterationFunction"
+                  class="col-form-label col col-sm-6 py-0 text-nowrap"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="left"
+                  title="Iteration function (z: current value, c: constant)"
+                  >Iteration Function</label
+                >
+                <input
+                  id="iterationFunction"
+                  type="text"
+                  class="form-control form-control-sm py-0"
+                  placeholder="e.g., z*z + c"
+                  value="z*z + c"
+                  style="font-family: monospace"
+                  title="Custom iteration function. Available: z, c, i, |x|, Re(x), Im(x), conj(x), exp(x), sin(x), cos(x), sqrt(x), log(x), pi, e, ^. Press Enter to apply."
+                />
+              </div>
+              <div style="width: 170px; margin-left: 8px">
+                <label
+                  class="col-form-label col col-sm-6 py-0"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="left"
+                  title="Initial z0 for iteration"
+                  >z0</label
+                >
+                <div class="d-flex">
+                  <input
+                    id="z0-real"
+                    type="number"
+                    class="form-control form-control-sm py-0"
+                    value="0"
+                    step="0.1"
+                    title="Real part of the initial z0 value for iteration (default: 0)"
+                  />
+                  <input
+                    id="z0-imag"
+                    type="number"
+                    class="form-control form-control-sm py-0 ms-2"
+                    value="0"
+                    step="0.1"
+                    title="Imaginary part of the initial z0 value for iteration (default: 0)"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="mb-2 row">
+            <div class="col col-sm-12">
+              <small class="form-text text-muted" style="font-size: 0.7rem">
+                How to use the iteration function:
+                <br />
+                z (current), c (constant), i (imaginary unit), |x| (absolute), Re(x), Im(x), conj(x), exp(x), sin(x),
+                cos(x), tan(x), sqrt(x), log(x), ln(x), pi, e, +, -, *, /, ^ (power), ()
+              </small>
+            </div>
+          </div>
+          <div class="mb-2 row">
+            <div class="col col-sm-6">
+              <label for="max-iterations" class="col-form-label col col-sm-6 py-0">Max iterations</label>
+              <input
+                id="max-iterations"
+                type="number"
+                class="form-control form-control-sm py-0"
+                value="1000"
+                step="1000"
+                title="Maximum number of iterations per pixel. Higher values reveal more detail but are slower. Shortcut: + / = to increase by 100, - to decrease by 100"
+              />
+            </div>
+            <div class="col col-sm-6">
+              <label for="palette-dropdown" class="col-form-label col col-sm-6 py-0">Palette</label>
+              <select
+                id="palette-dropdown"
+                class="form-select form-select-sm py-0"
+                title="Select the color palette used to render the fractal"
+              >
+                <!-- populated by JS -->
+              </select>
+            </div>
+          </div>
+<!-- ============================================================ -->
+<!-- Orbit Trap カスタム設定パネル                                   -->
+<!-- orbit_trap_custom パレット選択時のみ表示される                   -->
+<!-- ============================================================ -->
+<div id="orbit-trap-panel" class="d-none border rounded p-2 mb-2" style="background:rgba(0,0,0,0.15)">
+  <div class="mb-1 fw-semibold d-flex align-items-center" style="font-size:0.82em;opacity:0.8">
+    <span>Orbit Trap Settings</span>
+    <button id="ot-reset" class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2">↺</button>
+  </div>
+
+  <!-- 行1: Shape と Mode -->
+  <div class="mb-2 row g-2">
+    <div class="col-6" id="ot-shape-group">
+      <label for="ot-shape" class="col-form-label py-0" style="font-size:0.8em">Shape</label>
+      <select id="ot-shape" class="form-select form-select-sm py-0" title="トラップ形状を選択">
+        <option value="ring">Circle (Ring)</option>
+        <option value="cross">Cross</option>
+        <option value="point">Point</option>
+        <option value="line">Line</option>
+        <option value="parabola">Parabola</option>
+        <option value="triangle">Triangle</option>
+        <option value="square">Square</option>
+        <option value="bitmap">Bitmap Image</option>
+      </select>
+    </div>
+    <div class="col-6">
+      <label for="ot-mode" class="col-form-label py-0" style="font-size:0.8em">Mode</label>
+      <select id="ot-mode" class="form-select form-select-sm py-0" title="データ収集モードを選択">
+        <option value="distance_closest">Distance Closest (最近接)</option>
+        <option value="distance_farthest">Distance Farthest (最遠)</option>
+        <option value="distance_average">Distance Average (平均)</option>
+        <option value="capture_first">Capture First (初回捕捉)</option>
+        <option value="tia">TIA (三角不等式平均)</option>
+        <option value="capture_step">N-th Step (N番目の反復)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 行2: Size / Angle / Color Pattern -->
+  <div class="mb-2 row g-2">
+    <div class="col-4" id="ot-size-group">
+      <label for="ot-size" class="col-form-label py-0" style="font-size:0.8em">Size</label>
+      <input id="ot-size" type="number" class="form-control form-control-sm py-0" value="0.5" step="0.1" min="0"
+        title="形状のサイズ (半径 / 辺長など)" />
+    </div>
+    <div class="col-4" id="ot-angle-group">
+      <label for="ot-angle" class="col-form-label py-0" style="font-size:0.8em">Angle (°)</label>
+      <input id="ot-angle" type="number" class="form-control form-control-sm py-0" value="0" step="15"
+        title="形状の回転角 (度)" />
+    </div>
+    <div class="col-4" id="ot-color-pattern-group">
+      <label for="ot-color-pattern" class="col-form-label py-0" style="font-size:0.8em">Color</label>
+      <select id="ot-color-pattern" class="form-select form-select-sm py-0" title="着色パターンを選択">
+        <option value="cosine_rgb">Cosine RGB</option>
+        <option value="hsl_capture">HSL Capture</option>
+        <option value="tia_triangle">TIA Triangle</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 行3: Center X / Y -->
+  <div class="mb-2 row g-2" id="ot-center-group">
+    <div class="col-6">
+      <label for="ot-tx" class="col-form-label py-0" style="font-size:0.8em">Center X</label>
+      <input id="ot-tx" type="number" class="form-control form-control-sm py-0" value="0" step="0.1"
+        title="トラップ中心のX座標" />
+    </div>
+    <div class="col-6">
+      <label for="ot-ty" class="col-form-label py-0" style="font-size:0.8em">Center Y</label>
+      <input id="ot-ty" type="number" class="form-control form-control-sm py-0" value="0" step="0.1"
+        title="トラップ中心のY座標" />
+    </div>
+  </div>
+
+  <!-- 行4: Threshold / Start Iter (DISTANCE_FARTHEST / DISTANCE_AVERAGE / CAPTURE_FIRST) -->
+  <div class="mb-2 row g-2" id="ot-threshold-group">
+    <div class="col-6">
+      <label for="ot-threshold" class="col-form-label py-0" style="font-size:0.8em">Threshold</label>
+      <input id="ot-threshold" type="number" class="form-control form-control-sm py-0" value="0.5" step="0.05" min="0"
+        title="捕捉閾値: この距離以下のとき捕捉する" />
+    </div>
+    <div class="col-6" id="ot-start-iter-group">
+      <label for="ot-start-iter" class="col-form-label py-0" style="font-size:0.8em">Start Iter</label>
+      <input id="ot-start-iter" type="number" class="form-control form-control-sm py-0" value="0" step="1" min="0"
+        title="何反復目以降で捕捉を開始するか" />
+    </div>
+  </div>
+
+  <!-- 行5: N-th Step (CAPTURE_STEP のみ表示) -->
+  <div class="mb-2 row g-2 d-none" id="ot-step-group">
+    <div class="col-6">
+      <label for="ot-capture-step" class="col-form-label py-0" style="font-size:0.8em">N-th Step</label>
+      <input id="ot-capture-step" type="number" class="form-control form-control-sm py-0" value="1" step="1" min="1"
+        title="何番目の反復の値を採用するか (1から)" />
+    </div>
+  </div>
+
+  <!-- 行6: Bitmap画像選択 (BITMAP のみ表示) -->
+  <div class="mb-2 row g-2 d-none" id="ot-bitmap-group">
+    <div class="col-12">
+      <label for="ot-bitmap-file" class="col-form-label py-0 d-block" style="font-size:0.8em">
+        Bitmap Image <span class="text-muted">(PNG/JPEG)</span>
+      </label>
+      <div class="d-flex align-items-center gap-2">
+        <input id="ot-bitmap-file" type="file" class="form-control form-control-sm py-0" accept="image/*"
+          title="Orbit trapに使用する画像を選択 (矩形領域にマッピングされます)" />
+        <canvas id="ot-bitmap-preview" width="40" height="40" class="border rounded d-none"
+          style="image-rendering:pixelated"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- /orbit-trap-panel -->
+
+          <div class="mb-2 row">
+            <div class="col col-sm-6 d-flex align-items-start gap-3">
+              <div data-bs-toggle="tooltip" data-bs-placement="left" title="Use WebGPU for main fractal rendering">
+                <label for="gpu" class="col-form-label py-0 d-block">Fractal GPU</label>
+                <div class="d-flex align-items-center py-1">
+                  <div class="form-check form-switch m-0">
+                    <input
+                      id="gpu"
+                      class="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      checked
+                      title="Use WebGPU for accelerated fractal rendering (requires a compatible browser and GPU)"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label
+                  for="fullres"
+                  class="col-form-label py-0 d-block"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="left"
+                  title="Use physical pixels if different from display-pixels"
+                  >Hi DPI</label
+                >
+                <div class="d-flex align-items-center py-1">
+                  <div class="form-check form-switch m-0">
+                    <input
+                      id="fullres"
+                      class="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      title="Use physical (Hi-DPI) pixels for sharper rendering on high-resolution displays"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col col-sm-6 d-flex align-items-start gap-3">
+              <div>
+                <label
+                  for="smooth"
+                  class="col-form-label py-0 d-block"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="left"
+                  title="Smooth coloring"
+                  >Smooth</label
+                >
+                <div class="d-flex align-items-center py-1">
+                  <div class="form-check form-switch m-0">
+                    <input
+                      id="smooth"
+                      class="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      title="Enable smooth coloring using continuous iteration count for gradient transitions. Shortcut: s"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label
+                  for="escape-radius"
+                  class="col-form-label py-0 d-block"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="left"
+                  title="Escape radius. Points where |z| exceeds this value are treated as diverged. Changing disables smooth coloring."
+                  >Escape R</label
+                >
+                <input
+                  id="escape-radius"
+                  type="number"
+                  class="form-control form-control-sm py-0"
+                  value="4"
+                  min="0"
+                  step="0.1"
+                  style="width: 70px"
+                  title="Escape radius (default: 4). For z²+c boundary is 2; larger values shift color bands. Useful with custom functions."
+                />
+              </div>
+            </div>
+          </div>
+          <div class="mb-2 row">
+            <div class="col col-sm-6 d-flex align-items-start gap-3">
+              <div>
+                <label
+                  for="orbit-toggle"
+                  class="col-form-label py-0 d-block"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="left"
+                  title="Toggle orbit visualization on mouse hover"
+                  >Orbit</label
+                >
+                <div class="d-flex align-items-center py-1">
+                  <div class="form-check form-switch m-0">
+                    <input
+                      id="orbit-toggle"
+                      class="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      title="Toggle orbit visualization: draws the iteration trajectory of the point under the mouse cursor"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label for="orbit-mode" class="col-form-label py-0 d-block">Mode</label>
+                <select
+                  id="orbit-mode"
+                  class="form-select form-select-sm py-0"
+                  title="Orbit drawing mode: lines+dots, lines only, or dots only"
+                >
+                  <option value="lines+dots" selected>Lines+Dots</option>
+                  <option value="lines">Lines</option>
+                  <option value="dots">Dots</option>
+                </select>
+              </div>
+              <!-- orbit iter count removed; details popup will handle iteration info -->
+              <div>
+                <label for="detail-toggle" class="col-form-label py-0 d-block" data-bs-toggle="tooltip" data-bs-placement="left" title="Show detailed information in a hover popup">
+                  Details
+                </label>
+                <div class="d-flex align-items-center py-1">
+                  <div class="form-check form-switch m-0">
+                    <input
+                      id="detail-toggle"
+                      class="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      title="Toggle detailed hover information"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col col-sm-6">
+              <label
+                for="supersampling"
+                class="col-form-label col col-sm-6 py-0"
+                data-bs-toggle="tooltip"
+                data-bs-placement="left"
+                title="Supersampling for smoother edges (slower)"
+                >Supersampling</label
+              >
+              <select
+                id="supersampling"
+                class="form-select form-select-sm py-0"
+                title="Render multiple samples per pixel for smoother edges. Higher values significantly reduce performance."
+              >
+                <option value="0" selected>OFF</option>
+                <option value="2">2x2</option>
+                <option value="4">4x4</option>
+                <option value="8">8x8</option>
+                <option value="16">16x16</option>
+                <option value="32">32x32</option>
+              </select>
+            </div>
+          </div>
+          <div class="mb-2 row">
+            <div class="col col-sm-6">
+              <div class="d-flex align-items-center">
+                <label id="palette-density-label" for="palette-density" class="col-form-label py-0"
+                  >Palette density</label
+                >
+                <button
+                  type="button"
+                  id="reset-palette-density"
+                  class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2"
+                  title="Reset density"
+                >
+                  ↺
+                </button>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <input
+                  id="palette-density"
+                  type="range"
+                  class="form-range"
+                  min="-100"
+                  max="100"
+                  step="1"
+                  value="1"
+                  title="Adjust the density (frequency) of color cycles in the palette"
+                />
+                <input
+                  id="palette-density-input"
+                  type="number"
+                  class="form-control form-control-sm py-0"
+                  value="1"
+                  step="1"
+                  style="width: 70px"
+                  title="Palette density value. Accepts values outside the slider range."
+                />
+              </div>
+            </div>
+            <div class="col col-sm-6">
+              <div class="d-flex align-items-center">
+                <label id="palette-rotate-label" for="palette-rotate" class="col-form-label py-0"
+                  >Palette rotation</label
+                >
+                <button
+                  type="button"
+                  id="reset-palette-rotate"
+                  class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2"
+                  title="Reset rotation"
+                >
+                  ↺
+                </button>
+              </div>
+              <input
+                id="palette-rotate"
+                type="range"
+                class="form-range"
+                min="-180"
+                max="180"
+                step="1"
+                value="0"
+                title="Rotate the color offset of the palette (-180° to 180°)"
+              />
+            </div>
+          </div>
+          <!-- Buddhabrot controls -->
+          <div id="buddhabrot-section">
+            <hr />
+            <div id="buddhabrot-controls" class="mb-2 g-1">
+              <div class="mb-2 row">
+                <div class="col col-sm-6">
+                  <div class="d-flex align-items-start gap-3">
+                    <div style="flex: 1">
+                      <label for="buddhaMode" class="col-form-label py-0 d-block">Buddhabrot Mode</label>
+                      <select
+                        id="buddhaMode"
+                        class="form-select form-select-sm py-0"
+                        title="Buddhabrot: accumulates escaping orbits. Anti-Buddhabrot: accumulates non-escaping orbits."
+                      >
+                        <option value="buddha" selected>Buddhabrot</option>
+                        <option value="antibuddha">Anti-Buddhabrot</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="buddha-toggle" class="col-form-label py-0 d-block">View</label>
+                      <div class="d-flex align-items-center py-1">
+                        <div class="form-check form-switch m-0">
+                          <input
+                            id="buddha-toggle"
+                            class="form-check-input"
+                            type="checkbox"
+                            role="switch"
+                            disabled
+                            title="Show or hide the Buddhabrot overlay (enabled after rendering)"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col col-sm-6">
+                  <label for="buddha-iterations" class="col-form-label col col-sm-6 py-0">Samples</label>
+                  <input
+                    id="buddha-iterations"
+                    type="number"
+                    class="form-control form-control-sm py-0"
+                    value="3000000"
+                    step="100000"
+                    title="Total number of orbit samples for Buddhabrot rendering. More samples = higher quality but longer render time"
+                  />
+                </div>
+              </div>
+              <div class="mb-2 row">
+                <div class="col-6 d-flex align-items-start">
+                  <div>
+                    <label for="buddha-gpu" class="col-form-label py-0 d-block">Buddhabrot GPU</label>
+                    <div class="d-flex align-items-center py-1">
+                      <div class="form-check form-switch m-0">
+                        <input
+                          id="buddha-gpu"
+                          class="form-check-input"
+                          type="checkbox"
+                          role="switch"
+                          title="Use WebGPU acceleration for Buddhabrot rendering (requires a compatible browser and GPU)"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col col-sm-6">
+                  <label for="buddha-palette" class="col-form-label col col-sm-6 py-0">Palette</label>
+                  <select
+                    id="buddha-palette"
+                    class="form-select form-select-sm py-0 me-2"
+                    title="Select the color palette used for Buddhabrot rendering"
+                  >
+                    <!-- populated by JS -->
+                  </select>
+                </div>
+              </div>
+              <div class="mb-2 row">
+                <div class="col col-sm-6">
+                  <div class="d-flex align-items-center">
+                    <label for="buddha-brightness" class="col-form-label py-0">Buddhabrot Brightness</label>
+                    <button
+                      type="button"
+                      id="reset-buddha-brightness"
+                      class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2"
+                      title="Reset brightness"
+                    >
+                      ↺
+                    </button>
+                  </div>
+                  <input
+                    id="buddha-brightness"
+                    type="range"
+                    class="form-range"
+                    min="1.0"
+                    max="2.2"
+                    step="0.01"
+                    value="1.2"
+                    title="Adjust the brightness (exposure) of the Buddhabrot image"
+                  />
+                </div>
+                <div class="col col-sm-6">
+                  <div class="d-flex align-items-center">
+                    <label for="buddha-gamma" class="col-form-label py-0">Buddhabrot Gamma</label>
+                    <button
+                      type="button"
+                      id="reset-buddha-gamma"
+                      class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2"
+                      title="Reset gamma"
+                    >
+                      ↺
+                    </button>
+                  </div>
+                  <input
+                    id="buddha-gamma"
+                    type="range"
+                    class="form-range"
+                    min="0.3"
+                    max="20"
+                    step="0.01"
+                    value="4.8"
+                    title="Adjust the gamma correction of the Buddhabrot image. Higher values brighten dark areas."
+                  />
+                </div>
+              </div>
+              <div class="mb-2 row">
+                <div class="col col-sm-12">
+                  <div class="d-flex align-items-center">
+                    <label for="buddha-draw-speed" class="col-form-label py-0"
+                      >Render Speed Delay (CPU): <span id="buddha-draw-speed-value">0</span>ms</label
+                    >
+                    <button
+                      type="button"
+                      id="reset-buddha-draw-speed"
+                      class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2"
+                      title="Reset render speed"
+                    >
+                      ↺
+                    </button>
+                  </div>
+                  <input
+                    id="buddha-draw-speed"
+                    type="range"
+                    class="form-range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value="0"
+                    title="Delay between CPU render passes in ms. Increase to reduce CPU load and keep the UI responsive."
+                  />
+                </div>
+              </div>
+              <div class="g-1 row">
+                <div class="col-4">
+                  <button
+                    id="buddha-render"
+                    class="btn btn-primary btn-sm w-100"
+                    title="Start Buddhabrot rendering. Shortcut: b"
+                  >
+                    Render Buddhabrot
+                  </button>
+                </div>
+                <div class="col-2">
+                  <button
+                    id="buddha-stop"
+                    class="btn btn-outline-danger btn-sm w-100"
+                    type="button"
+                    title="Stop Buddhabrot"
+                  >
+                    Stop
+                  </button>
+                </div>
+                <div class="col-3">
+                  <select
+                    id="buddha-scale"
+                    class="form-select form-select-sm"
+                    title="High-resolution rendering multiplier"
+                  >
+                    <option value="1" selected>1x (screen)</option>
+                    <option value="2">2x</option>
+                    <option value="3">3x</option>
+                    <option value="4">4x</option>
+                    <option value="5">5x</option>
+                  </select>
+                </div>
+                <div class="col-3">
+                  <button
+                    id="buddha-download"
+                    class="btn btn-success btn-sm w-100"
+                    type="button"
+                    disabled
+                    title="Download high-resolution images"
+                  >
+                    Save Hi-Res Image
+                  </button>
+                </div>
+              </div>
+            </div>
+            <hr />
+          </div>
+          <!-- /#buddhabrot-section -->
+          <div class="g-1 row">
+            <div class="col col-sm-6">
+              <button class="btn btn-success btn-sm w-100" id="fullscreen" title="Toggle fullscreen mode. Shortcut: f">
+                Fullscreen
+              </button>
+            </div>
+            <div class="col col-sm-6">
+              <button
+                class="btn btn-success btn-sm w-100"
+                id="reset"
+                title="Reset all settings (iterations, palette, zoom, position, etc.) to their initial default values. Shortcut: Backspace"
+              >
+                Reset All Settings
+              </button>
+            </div>
+          </div>
+          <div class="g-1 row">
+            <div class="col col-sm-6 d-flex align-items-center">
+              <button
+                id="save-image"
+                class="btn btn-success btn-sm w-100"
+                type="button"
+                title="Save current image as PNG"
+              >
+                Save Image
+              </button>
+            </div>
+            <div class="col col-sm-6 d-flex align-items-center gap-2">
+              <div style="flex: 1">
+                <select
+                  id="jump-to"
+                  class="form-select form-select-sm w-100"
+                  aria-label="Jump To favorites"
+                  title="Jump to a saved favorite fractal location"
+                >
+                  <option value="" selected disabled>Jump To...</option>
+                  <!-- options populated by JS -->
+                </select>
+              </div>
+              <div>
+                <label for="anim-enable" class="col-form-label py-0 d-block">Animation</label>
+                <div class="d-flex align-items-center py-1">
+                  <div class="form-check form-switch m-0">
+                    <input
+                      class="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      id="anim-enable"
+                      title="Enable automatic animation that cycles through saved favorite locations"
+                    />
+                  </div>
+                </div>
+              </div>
+              <button id="anim-stop" class="btn btn-outline-danger btn-sm" title="Stop animation" type="button">
+                Stop
+              </button>
+              <!-- Animation speed fixed to 0.15 (slider removed) -->
+            </div>
+          </div>
+          <hr />
+          <div>
+            <div class="mb-2 row align-items-center">
+              <div class="col col-sm-2">
+                <label for="coordX">X（Real）</label>
+              </div>
+              <div class="col col-sm-10">
+                <input
+                  type="text"
+                  id="coordX"
+                  class="form-control form-control-sm"
+                  placeholder="e.g., -0.716"
+                  title="Real part of the center coordinate"
+                />
+              </div>
+            </div>
+            <div class="mb-2 row align-items-center">
+              <div class="col col-sm-2">
+                <label for="coordY">Y（Imaginary）</label>
+              </div>
+              <div class="col col-sm-10">
+                <input
+                  type="text"
+                  id="coordY"
+                  class="form-control form-control-sm"
+                  placeholder="e.g., -0.000809"
+                  title="Imaginary part of the center coordinate"
+                />
+              </div>
+            </div>
+            <div class="mb-2 row align-items-center">
+              <div class="col col-sm-2">
+                <label for="coordZoom">Zoom</label>
+              </div>
+              <div class="col col-sm-10">
+                <input
+                  type="text"
+                  id="coordZoom"
+                  class="form-control form-control-sm"
+                  placeholder="e.g., 50 or 4.70e3"
+                  title="Zoom level. Enter a plain number or scientific notation (e.g., 4.70e3)"
+                />
+              </div>
+            </div>
+            <div class="g-1 row">
+              <div class="col col-sm-6">
+                <button
+                  id="applyCoords"
+                  class="btn btn-sm btn-primary w-100"
+                  title="Apply the entered X, Y coordinates and zoom level to navigate to that location"
+                >
+                  Apply Coordinates
+                </button>
+              </div>
+              <div class="col col-sm-6">
+                <button
+                  id="resetPosition"
+                  class="btn btn-sm btn-success w-100"
+                  title="Reset coordinates and zoom to initial values"
+                >
+                  Reset Coordinates
+                </button>
+              </div>
+            </div>
+            <hr />
+            <!-- <div class="mb-0 row">
+            <div class="col col-sm-3">
+              <label>Size</label>
+            </div>
+            <div class="col col-sm-3">
+              <span id="sizeValue"></span>
+            </div>
+          </div> -->
+            <div class="mb-0 row">
+              <div class="col col-sm-3">
+                <label>Render time</label>
+              </div>
+              <div class="col col-sm-3">
+                <span id="renderTimeValue"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- popup element used to show hover details (positioned absolutely) -->
+      <div id="detail-popup" hidden></div>
+      <script type="module" src="./index.js"></script>
+      <script src="bootstrap.bundle.min.js"></script>
+    </div>
+  </body>
+</html>

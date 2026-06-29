@@ -1,0 +1,7 @@
+.idea
+*.iml
+*.wasm
+local
+node_modules
+buddhabrotWorker.js
+.vscode
