@@ -5408,8 +5408,29 @@ function resizeToCanvasSize() {
   }
 
   // ── 通常モード ──────────────────────────────────────────
-  let width = canvasElement.offsetWidth
-  let height = canvasElement.offsetHeight
+  const mandelbrotDiv = document.getElementById('mandelbrot')
+  const mbWrap = document.getElementById('mandelbrot-canvas-wrap')
+  const isWideLayout = window.innerWidth >= 1412
+  if (mandelbrotDiv) {
+    if (isWideLayout) {
+      setStyleIfChanged(mandelbrotDiv, 'height', '')
+      setStyleIfChanged(mandelbrotDiv, 'width', '')
+      setStyleIfChanged(mandelbrotDiv, 'flex', '')
+    } else {
+      const targetWidth = Math.max(1, Math.round(mandelbrotDiv.clientWidth || canvasElement.offsetWidth || 1))
+      setStyleIfChanged(mandelbrotDiv, 'height', `${Math.round((targetWidth * 3) / 4)}px`)
+      setStyleIfChanged(mandelbrotDiv, 'width', '')
+      setStyleIfChanged(mandelbrotDiv, 'flex', '')
+    }
+  }
+  if (mbWrap) {
+    setStyleIfChanged(mbWrap, 'width', '100%')
+    setStyleIfChanged(mbWrap, 'height', '100%')
+    setStyleIfChanged(mbWrap, 'flex', '1 1 auto')
+  }
+
+  let width = Math.max(1, Math.round(mandelbrotDiv?.clientWidth || canvasElement.offsetWidth || 1))
+  let height = Math.max(1, Math.round(mandelbrotDiv?.clientHeight || canvasElement.offsetHeight || 1))
 
   if (devicePixelBoxSize == null && fullResToggle?.checked) {
     refreshDevicePixelBoxSize()
