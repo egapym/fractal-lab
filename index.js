@@ -6792,6 +6792,9 @@ function initListeners() {
           if (juliaSection) {
             juliaSection.setAttribute('hidden', '')
             juliaSection.classList.remove('visible')
+            juliaSection.style.width = ''
+            juliaSection.style.height = ''
+            juliaSection.style.flex = ''
           }
           if (crosshair) crosshair.setAttribute('hidden', '')
           if (juliaResetBtn) juliaResetBtn.setAttribute('hidden', '')
@@ -6802,6 +6805,11 @@ function initListeners() {
             exitJuliaFullscreen()
           }
           // 明示的な inline size を消し、CSS 管理へ戻す
+          if (mandelbrotDiv) {
+            mandelbrotDiv.style.width = ''
+            mandelbrotDiv.style.height = ''
+            mandelbrotDiv.style.flex = ''
+          }
           const mbWrap = document.getElementById('mandelbrot-canvas-wrap')
           if (mbWrap) {
             mbWrap.style.width = ''
@@ -6814,7 +6822,9 @@ function initListeners() {
             juliaWrap.style.height = ''
             juliaWrap.style.flex = ''
           }
-          resizeToCanvasSize()
+          requestAnimationFrame(() => {
+            resizeToCanvasSize()
+          })
         }
       })
     }
