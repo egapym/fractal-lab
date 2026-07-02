@@ -3937,6 +3937,7 @@ function fxpToDecimalString(fxp, precision) {
 let lastX = canvasElement.width / 2
 let lastY = canvasElement.height / 2
 let dragStart = null
+let pendingGpuDragRedraw = false
 let juliaDragStart = null
 let orbitDrawEnabled = false // 軌道表示が有効か
 let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
@@ -4846,6 +4847,7 @@ function onMouseDown(evt) {
     if (buddhaActive) return
   }
   _orbitPinDragged = false
+  pendingGpuDragRedraw = false
   updateMousePos(evt)
   dragStart = [lastX, lastY]
 }
@@ -4898,6 +4900,10 @@ function onMouseMove(evt) {
   updateMousePos(evt)
   if (evt.type === 'mousemove' && (evt.buttons & 1) === 0) {
     // 外からキャンバスへ入ったときの意図しないドラッグ開始を防ぐ
+    if (pendingGpuDragRedraw) {
+      pendingGpuDragRedraw = false
+      redraw()
+    }
     dragStart = null
     return
   }
@@ -4940,7 +4946,12 @@ function onMouseMove(evt) {
     panCanvas(dx, dy)
     dragStart = [lastX, lastY]
     _orbitPinDragged = true
-    redraw()
+    if (fractal.useGpu) {
+      pendingGpuDragRedraw = true
+      if (juliaState.active) redrawJulia()
+    } else {
+      redraw()
+    }
     _refreshPinnedOrbits()
   }
 }
@@ -4972,6 +4983,10 @@ function panCanvas(dx, dy) {
 function onMouseUp(evt) {
   updateMousePos(evt)
   dragStart = null
+  if (pendingGpuDragRedraw) {
+    pendingGpuDragRedraw = false
+    redraw()
+  }
 }
 
 function updateMousePos(evt) {
