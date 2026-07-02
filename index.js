@@ -5836,9 +5836,18 @@ function initListeners() {
 
           const factor = newTouchDistance / juliaLastTouchDistance
           const renderer = juliaState.renderer
-          const [centerX, centerY] = _juliaCanvasCoordsFromClient(newTouchCenter[0], newTouchCenter[1])
-          const ptr = renderer.canvas2complex(centerX, centerY)
           const p = renderer.precision
+          const [lastCenterX, lastCenterY] = _juliaCanvasCoordsFromClient(juliaLastTouchCenter[0], juliaLastTouchCenter[1])
+          const [newCenterX, newCenterY] = _juliaCanvasCoordsFromClient(newTouchCenter[0], newTouchCenter[1])
+          const dx = newCenterX - lastCenterX
+          const dy = newCenterY - lastCenterY
+          const w_fx = fxp.fromNumber(renderer.width, p)
+          const scale_fx = renderer.zoom.withScale(p).multiply(w_fx).divide(fxp.fromNumber(4, p))
+          const dxFx = fxp.fromNumber(-dx, p).divide(scale_fx)
+          const dyFx = fxp.fromNumber(-dy, p).divide(scale_fx)
+          renderer.center = [renderer.center[0].withScale(p).add(dxFx), renderer.center[1].withScale(p).add(dyFx)]
+
+          const ptr = renderer.canvas2complex(newCenterX, newCenterY)
           const lowerBound = MIN_ZOOM.withScale(p)
           const bigFactor = fxp.fromNumber(factor, p)
           const newZoom = renderer.zoom.withScale(p).multiply(bigFactor).max(lowerBound)
