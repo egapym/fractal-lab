@@ -5187,6 +5187,42 @@ function applyPixelDeltaToCenter(dx, dy) {
 }
 
 let devicePixelBoxSize = null
+let resizeRafId = null
+let pendingResizeEntries = null
+let lastAppliedCanvasSizeKey = ''
+let lastKnownViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0
+
+function setStyleIfChanged(element, property, value) {
+  if (!element) return false
+  if (element.style[property] === value) return false
+  element.style[property] = value
+  return true
+}
+
+function setCanvasBufferSizeIfChanged(canvas, width, height) {
+  if (!canvas) return false
+  let changed = false
+  if (canvas.width !== width) {
+    canvas.width = width
+    changed = true
+  }
+  if (canvas.height !== height) {
+    canvas.height = height
+    changed = true
+  }
+  return changed
+}
+
+function scheduleResize(entries) {
+  pendingResizeEntries = entries || null
+  if (resizeRafId != null) return
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null
+    const queuedEntries = pendingResizeEntries
+    pendingResizeEntries = null
+    onResize(queuedEntries)
+  })
+}
 
 function onResize(entries) {
   // let debugText = `${canvasElement.offsetWidth}x${canvasElement.offsetHeight}`
@@ -5208,6 +5244,22 @@ function onResize(entries) {
   resizeToCanvasSize()
 }
 
+function refreshDevicePixelBoxSize() {
+  devicePixelBoxSize = null
+  try {
+    const dpr = window.devicePixelRatio || 1
+    const rect = canvasElement.getBoundingClientRect()
+    const width = Math.max(1, Math.round(rect.width * dpr))
+    const height = Math.max(1, Math.round(rect.height * dpr))
+    if (width > 0 && height > 0) {
+      devicePixelBoxSize = [width, height]
+    }
+  } catch (_e) {}
+  if (typeof fullResToggle !== 'undefined' && fullResToggle !== null) {
+    fullResToggle.disabled = devicePixelBoxSize == null
+  }
+}
+
 function resizeToCanvasSize() {
   // ── Julia Mode ──────────────────────────────────────────────────────────
   if (juliaState?.active) {
@@ -5219,26 +5271,23 @@ function resizeToCanvasSize() {
       // Julia キャンバスはビューポート全体を埋める
       const juliaWrap = document.querySelector('.julia-canvas-wrap')
       if (juliaWrap) {
-        juliaWrap.style.width = `${vw}px`
-        juliaWrap.style.height = `${vh}px`
-        juliaWrap.style.flex = '0 0 auto'
+        setStyleIfChanged(juliaWrap, 'width', `${vw}px`)
+        setStyleIfChanged(juliaWrap, 'height', `${vh}px`)
+        setStyleIfChanged(juliaWrap, 'flex', '0 0 auto')
       }
       // Hi DPI: CSS表示サイズ(vw/vh)は変えず、バッファを物理ピクセルに拡大する
       const hiDPIFs = fullResToggle?.checked && devicePixelBoxSize != null
       const dprFs = hiDPIFs ? window.devicePixelRatio : 1
       const jCanvas = document.getElementById('julia-canvas')
       if (jCanvas && juliaState.renderer) {
-        jCanvas.width = Math.round(vw * dprFs)
-        jCanvas.height = Math.round(vh * dprFs)
-        juliaState.renderer.resized()
+        const jCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, Math.round(vw * dprFs), Math.round(vh * dprFs))
+        if (jCanvasChanged) juliaState.renderer.resized()
       }
 
       // MB キャンバスは設定パネル内のプレビューなので、CSS 上の表示サイズを使う
       const mbW = Math.max(1, canvasElement.offsetWidth)
       const mbH = Math.max(1, canvasElement.offsetHeight)
-      if (canvasElement.width !== mbW || canvasElement.height !== mbH) {
-        canvasElement.width = mbW
-        canvasElement.height = mbH
+      if (setCanvasBufferSizeIfChanged(canvasElement, mbW, mbH)) {
         resizeTmpCanvas()
         fractal.resized()
       }
@@ -5287,15 +5336,15 @@ function resizeToCanvasSize() {
     // flex:none にして、flex レイアウトによる上書きを防ぐ。
     const mbWrap = document.getElementById('mandelbrot-canvas-wrap')
     if (mbWrap) {
-      mbWrap.style.width = `${canvasW}px`
-      mbWrap.style.height = `${canvasH}px`
-      mbWrap.style.flex = '0 0 auto'
+      setStyleIfChanged(mbWrap, 'width', `${canvasW}px`)
+      setStyleIfChanged(mbWrap, 'height', `${canvasH}px`)
+      setStyleIfChanged(mbWrap, 'flex', '0 0 auto')
     }
     const juliaWrap = document.querySelector('.julia-canvas-wrap')
     if (juliaWrap) {
-      juliaWrap.style.width = `${canvasW}px`
-      juliaWrap.style.height = `${canvasH}px`
-      juliaWrap.style.flex = '0 0 auto'
+      setStyleIfChanged(juliaWrap, 'width', `${canvasW}px`)
+      setStyleIfChanged(juliaWrap, 'height', `${canvasH}px`)
+      setStyleIfChanged(juliaWrap, 'flex', '0 0 auto')
     }
 
     // Hi DPI: CSS表示サイズ(canvasW/canvasH)は変えず、バッファを物理ピクセルに拡大する
@@ -5308,16 +5357,14 @@ function resizeToCanvasSize() {
     if (sizeEl) sizeEl.innerText = `${bufW}x${bufH}`
 
     // メインキャンバスの実ピクセルサイズを設定する
-    canvasElement.width = bufW
-    canvasElement.height = bufH
-    resizeTmpCanvas()
+    const mainCanvasChanged = setCanvasBufferSizeIfChanged(canvasElement, bufW, bufH)
+    if (mainCanvasChanged) resizeTmpCanvas()
 
     // Julia キャンバスの実ピクセルサイズを設定する
     const jCanvas = document.getElementById('julia-canvas')
     if (jCanvas && juliaState.renderer) {
-      jCanvas.width = bufW
-      jCanvas.height = bufH
-      juliaState.renderer.resized()
+      const juliaCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, bufW, bufH)
+      if (juliaCanvasChanged) juliaState.renderer.resized()
     }
 
     // Buddhabrot 表示中は、その結果を描き直して見た目を保つ
@@ -5339,15 +5386,19 @@ function resizeToCanvasSize() {
       return
     }
 
-    fractal.resized()
+    if (mainCanvasChanged) fractal.resized()
     showZoomFactor()
-    redraw()
+    if (mainCanvasChanged) redraw()
     return
   }
 
   // ── 通常モード ──────────────────────────────────────────
   let width = canvasElement.offsetWidth
   let height = canvasElement.offsetHeight
+
+  if (devicePixelBoxSize == null && fullResToggle?.checked) {
+    refreshDevicePixelBoxSize()
+  }
 
   if (fullResToggle?.checked && devicePixelBoxSize != null) {
     ;[width, height] = devicePixelBoxSize
@@ -5356,10 +5407,16 @@ function resizeToCanvasSize() {
   const sizeEl = document.getElementById('sizeValue')
   if (sizeEl) sizeEl.innerText = `${width}x${height}`
 
-  canvasElement.width = width
-  canvasElement.height = height
+  const sizeKey = `${width}x${height}|julia:${juliaState?.active ? 1 : 0}|fs:${document.fullscreenElement ? 1 : 0}|hidpi:${fullResToggle?.checked && devicePixelBoxSize != null ? 1 : 0}`
+  if (lastAppliedCanvasSizeKey === sizeKey && canvasElement.width === width && canvasElement.height === height) {
+    showZoomFactor()
+    return
+  }
+  lastAppliedCanvasSizeKey = sizeKey
 
-  resizeTmpCanvas()
+  const mainCanvasChanged = setCanvasBufferSizeIfChanged(canvasElement, width, height)
+
+  if (mainCanvasChanged) resizeTmpCanvas()
   // Buddhabrot 実行中は通常の Mandelbrot 再描画へ戻さず、既存結果を描き直す。
   // これにより、フルスクリーン切替時の描画切替や長時間ジョブの中断を防げる。
   if (buddhaActive && buddhaRunner) {
@@ -5386,7 +5443,7 @@ function resizeToCanvasSize() {
     return
   }
 
-  fractal.resized()
+  if (mainCanvasChanged) fractal.resized()
   showZoomFactor()
   redraw()
 }
@@ -5499,20 +5556,28 @@ function initListeners() {
     }
   })
 
-  new ResizeObserver(onResize).observe(canvasElement)
-
   // Julia モードではメインキャンバスサイズを JS で明示設定するため、
-  // canvasElement の ResizeObserver だけでは window resize を拾えない。
-  // そのため、別の resize リスナーを用意する。
+  // window / visualViewport 由来の変化を拾う。
   let _juliaResizeTimer = null
   window.addEventListener('resize', () => {
-    if (juliaState?.active && !document.fullscreenElement) {
-      clearTimeout(_juliaResizeTimer)
-      _juliaResizeTimer = setTimeout(() => {
-        resizeToCanvasSize()
+    clearTimeout(_juliaResizeTimer)
+    _juliaResizeTimer = setTimeout(() => {
+      const currentWidth = window.innerWidth
+      const widthChanged = currentWidth !== lastKnownViewportWidth
+      lastKnownViewportWidth = currentWidth
+      if (!widthChanged && !juliaState?.active && !document.fullscreenElement) return
+      scheduleResize()
+      if (juliaState?.active && !document.fullscreenElement) {
         redrawJulia()
-      }, 60)
-    }
+      }
+    }, 60)
+  })
+  window.addEventListener('orientationchange', () => {
+    scheduleResize()
+  })
+  window.visualViewport?.addEventListener('resize', () => {
+    if (!juliaState?.active && !document.fullscreenElement) return
+    scheduleResize()
   })
 
   canvasElement.addEventListener('mousedown', onMouseDown)
@@ -5654,6 +5719,7 @@ function initListeners() {
   canvasElement.addEventListener(
     'touchstart',
     (evt) => {
+      if (evt.cancelable && evt.touches.length >= 1) evt.preventDefault()
       if (evt.touches.length === 1) {
         onMouseDown(evt)
       }
@@ -5668,18 +5734,20 @@ function initListeners() {
         ]
       }
     },
-    { passive: true },
+    { passive: false },
   )
   canvasElement.addEventListener(
     'touchmove',
     (evt) => {
       if (evt.touches.length === 1) {
+        if (evt.cancelable && document.fullscreenElement == null) evt.preventDefault()
         onMouseMove(evt)
         if (document.fullscreenElement != null) {
           // no preventDefault in full-screen mode because this may be used to exit full-screen
         }
       }
       if (evt.touches.length === 2) {
+        if (evt.cancelable && document.fullscreenElement == null) evt.preventDefault()
         // Buddhabrot 表示中、またはトグルがオンならピンチ操作を無視する
         const t = document.getElementById('buddha-toggle')
         if (buddhaActive || t?.checked) {
@@ -5719,7 +5787,7 @@ function initListeners() {
         lastTouchCenter = newTouchCenter
       }
     },
-    { passive: true },
+    { passive: false },
   )
   canvasElement.addEventListener('touchend', (evt) => {
     onMouseUp(evt)

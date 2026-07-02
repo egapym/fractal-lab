@@ -425,7 +425,7 @@ footer {
     color: #7CFC00;
     background-color: rgba(0, 0, 0, 0.35);
     text-align: center;
-    margin-bottom: 0.2rem;
+    margin-bottom: 0;
 }
 
 #mandelbrot {

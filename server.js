@@ -27,7 +27,13 @@ const server = http.createServer((req, res) => {
       res.writeHead(500, { 'Content-Type': 'text/plain' })
       res.end('Internal Server Error')
     } else {
-      res.writeHead(200, { 'Content-Type': contentType })
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Surrogate-Control': 'no-store',
+      })
       res.end(data)
     }
   })
