@@ -430,6 +430,8 @@ footer {
 
 #mandelbrot {
     display: flex;
+    align-items: stretch;
+    overflow: hidden;
 }
 
 .canvas-wrap {
@@ -440,6 +442,13 @@ footer {
     border: 1px solid rgba(128, 128, 128, 0.4);
     border-radius: 4px;
     overflow: hidden;
+}
+
+#mandelbrot:not(.julia-mode) #mandelbrot-canvas-wrap {
+    width: 100%;
+    height: 100%;
+    flex: 1 1 auto;
+    align-self: stretch;
 }
 
 @media all and (max-width: 1200px) {

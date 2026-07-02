@@ -3939,6 +3939,8 @@ let lastY = canvasElement.height / 2
 let dragStart = null
 let pendingGpuDragRedraw = false
 let juliaDragStart = null
+let juliaLastTouchDistance = null
+let juliaLastTouchCenter = null
 let orbitDrawEnabled = false // 軌道表示が有効か
 let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
 // 軌道の固定表示。キャンバスをクリックすると、その点に軌道を固定する。
@@ -4100,6 +4102,15 @@ function _juliaCanvasCoords(evt) {
   return [
     (evt.clientX - rect.left) * (renderer.canvas.width / rect.width),
     (evt.clientY - rect.top) * (renderer.canvas.height / rect.height),
+  ]
+}
+
+function _juliaCanvasCoordsFromClient(clientX, clientY) {
+  const renderer = juliaState.renderer
+  const rect = renderer.canvas.getBoundingClientRect()
+  return [
+    (clientX - rect.left) * (renderer.canvas.width / rect.width),
+    (clientY - rect.top) * (renderer.canvas.height / rect.height),
   ]
 }
 
@@ -5749,6 +5760,106 @@ function initListeners() {
       try {
         drawOrbitOnJuliaCanvasAtComplex(re, im)
       } catch (_) {}
+    })
+    juliaCanvasElement.addEventListener(
+      'touchstart',
+      (evt) => {
+        if (!juliaState.active || !juliaState.renderer) return
+        if (evt.cancelable) evt.preventDefault()
+        if (evt.touches.length === 1) {
+          _juliaPinDragged = false
+          juliaDragStart = _juliaCanvasCoordsFromClient(evt.touches[0].clientX, evt.touches[0].clientY)
+          juliaLastTouchDistance = null
+          juliaLastTouchCenter = null
+        }
+        if (evt.touches.length === 2) {
+          juliaDragStart = null
+          juliaLastTouchDistance = Math.hypot(
+            evt.touches[0].pageX - evt.touches[1].pageX,
+            evt.touches[0].pageY - evt.touches[1].pageY,
+          )
+          juliaLastTouchCenter = [
+            (evt.touches[0].clientX + evt.touches[1].clientX) / 2,
+            (evt.touches[0].clientY + evt.touches[1].clientY) / 2,
+          ]
+        }
+      },
+      { passive: false },
+    )
+    juliaCanvasElement.addEventListener(
+      'touchmove',
+      (evt) => {
+        if (!juliaState.active || !juliaState.renderer) return
+        if (evt.cancelable) evt.preventDefault()
+
+        if (evt.touches.length === 1 && juliaDragStart) {
+          const renderer = juliaState.renderer
+          const [x, y] = _juliaCanvasCoordsFromClient(evt.touches[0].clientX, evt.touches[0].clientY)
+          const dx = x - juliaDragStart[0]
+          const dy = y - juliaDragStart[1]
+
+          const p = renderer.precision
+          const w_fx = fxp.fromNumber(renderer.width, p)
+          const scale_fx = renderer.zoom.withScale(p).multiply(w_fx).divide(fxp.fromNumber(4, p))
+          const dxFx = fxp.fromNumber(-dx, p).divide(scale_fx)
+          const dyFx = fxp.fromNumber(-dy, p).divide(scale_fx)
+
+          renderer.center = [renderer.center[0].withScale(p).add(dxFx), renderer.center[1].withScale(p).add(dyFx)]
+
+          const ctx = renderer.canvas.getContext('2d')
+          ctx.save()
+          ctx.translate(dx, dy)
+          ctx.drawImage(renderer.canvas, 0, 0)
+          ctx.restore()
+
+          juliaDragStart = [x, y]
+          _juliaPinDragged = true
+          redrawJulia()
+          _refreshPinnedOrbits()
+          return
+        }
+
+        if (evt.touches.length === 2) {
+          const newTouchDistance = Math.hypot(
+            evt.touches[0].pageX - evt.touches[1].pageX,
+            evt.touches[0].pageY - evt.touches[1].pageY,
+          )
+          const newTouchCenter = [
+            (evt.touches[0].clientX + evt.touches[1].clientX) / 2,
+            (evt.touches[0].clientY + evt.touches[1].clientY) / 2,
+          ]
+          if (!juliaLastTouchDistance || !juliaLastTouchCenter) {
+            juliaLastTouchDistance = newTouchDistance
+            juliaLastTouchCenter = newTouchCenter
+            return
+          }
+
+          const factor = newTouchDistance / juliaLastTouchDistance
+          const renderer = juliaState.renderer
+          const [centerX, centerY] = _juliaCanvasCoordsFromClient(newTouchCenter[0], newTouchCenter[1])
+          const ptr = renderer.canvas2complex(centerX, centerY)
+          const p = renderer.precision
+          const lowerBound = MIN_ZOOM.withScale(p)
+          const bigFactor = fxp.fromNumber(factor, p)
+          const newZoom = renderer.zoom.withScale(p).multiply(bigFactor).max(lowerBound)
+          const invFactor = fxp.fromNumber(1.0 / factor, p)
+          const offsetX = ptr[0].subtract(renderer.center[0].withScale(p)).multiply(invFactor)
+          const offsetY = ptr[1].subtract(renderer.center[1].withScale(p)).multiply(invFactor)
+          renderer.center = [ptr[0].subtract(offsetX), ptr[1].subtract(offsetY)]
+          renderer.zoom = newZoom
+
+          redrawJulia()
+          _refreshPinnedOrbits()
+          juliaLastTouchDistance = newTouchDistance
+          juliaLastTouchCenter = newTouchCenter
+        }
+      },
+      { passive: false },
+    )
+    juliaCanvasElement.addEventListener('touchend', (_evt) => {
+      onJuliaMouseUp()
+      juliaLastTouchDistance = null
+      juliaLastTouchCenter = null
     })
   }
 
