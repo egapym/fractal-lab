@@ -3941,6 +3941,9 @@ let pendingGpuDragRedraw = false
 let juliaDragStart = null
 let juliaLastTouchDistance = null
 let juliaLastTouchCenter = null
+let gpuGestureRedrawTimer = null
+let gpuGestureRedrawPending = false
+let lastGpuGestureRedrawAt = 0
 let orbitDrawEnabled = false // 軌道表示が有効か
 let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
 // 軌道の固定表示。キャンバスをクリックすると、その点に軌道を固定する。
@@ -3959,7 +3962,33 @@ function zoomWithClicks(clicks, cooldown) {
   zoomWithFactor(scaleFactor ** clicks, cooldown)
 }
 
-function zoomWithFactor(factor, cooldown) {
+function scheduleGpuGestureRedraw() {
+  gpuGestureRedrawPending = true
+  const now = performance.now()
+  const MIN_GPU_GESTURE_REDRAW_INTERVAL = 120
+  const wait = Math.max(0, MIN_GPU_GESTURE_REDRAW_INTERVAL - (now - lastGpuGestureRedrawAt))
+  if (gpuGestureRedrawTimer != null) return
+  gpuGestureRedrawTimer = setTimeout(() => {
+    gpuGestureRedrawTimer = null
+    if (!gpuGestureRedrawPending) return
+    gpuGestureRedrawPending = false
+    lastGpuGestureRedrawAt = performance.now()
+    redraw(false, 0)
+  }, wait)
+}
+
+function flushGpuGestureRedraw() {
+  if (gpuGestureRedrawTimer != null) {
+    clearTimeout(gpuGestureRedrawTimer)
+    gpuGestureRedrawTimer = null
+  }
+  if (!gpuGestureRedrawPending) return
+  gpuGestureRedrawPending = false
+  lastGpuGestureRedrawAt = performance.now()
+  redraw(false, 0)
+}
+
+function zoomWithFactor(factor, cooldown, options = {}) {
   if (buddhaActive) return
   // stopBuddhaPreserveDisplay は runner が実行中のときだけ呼ぶ。
   // 停止済みで呼ぶと density バッファが同期描画され、ズームのたびに
@@ -4016,7 +4045,11 @@ function zoomWithFactor(factor, cooldown) {
   fractal.setZoom(newZoom)
 
   scaleCanvas(factor, lastX, lastY)
-  redraw(false, cooldown)
+  if (options.gesture && fractal.useGpu) {
+    scheduleGpuGestureRedraw()
+  } else {
+    redraw(false, cooldown)
+  }
   _refreshPinnedOrbits()
   // 軌道表示が有効で未固定なら、現在のマウス位置で描き直す。
   // ズームで座標変換が変わっても、マウスを動かすまで mousemove は来ないため。
@@ -5938,7 +5971,7 @@ function initListeners() {
         applyPixelDeltaToCenter(dx, dy)
         panCanvas(dx, dy)
 
-        zoomWithFactor(factor, 0)
+        zoomWithFactor(factor, 0, { gesture: true })
         lastTouchDistance = newTouchDistance
         lastTouchCenter = newTouchCenter
       }
@@ -5949,7 +5982,14 @@ function initListeners() {
     onMouseUp(evt)
     lastTouchDistance = null
     lastTouchCenter = null
+    flushGpuGestureRedraw()
     // evt.preventDefault()
+  })
+  canvasElement.addEventListener('touchcancel', () => {
+    dragStart = null
+    lastTouchDistance = null
+    lastTouchCenter = null
+    flushGpuGestureRedraw()
   })
 
   DOM.iterations.addEventListener('change', (event) => {
