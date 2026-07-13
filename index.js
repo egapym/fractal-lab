@@ -11,6 +11,7 @@ import { functionPresets } from './functionPresets.mjs'
 import * as fxp from './fxp.mjs'
 import * as mcgpu from './mandelbrotCustomWebGPU.mjs'
 import * as mgpu from './mandelbrotWebGPU.mjs'
+import { OrbitTrapWebGPU } from './orbitTrapBitmapWebGPU.mjs'
 import * as palette from './palette.js'
 import { mandelbrot_high_precision } from './sharedCalculations.mjs'
 import { jsExprToWGSL_safe } from './wgslCompiler.mjs'
@@ -33,6 +34,20 @@ function _trapSpecKey(trapSpec) {
   if (!trapSpec) return 'null'
   const { bitmapData, ...rest } = trapSpec
   return JSON.stringify(rest)
+}
+
+function _orbitTrapColorPatternId(paletteObj) {
+  if (paletteObj?._colorPatternId) return paletteObj._colorPatternId
+  if (paletteObj?.id === 'orbit_trap_tia' || paletteObj?.trapSpec?.mode === 'tia') {
+    return palette.COLOR_PATTERN.TIA_TRIANGLE
+  }
+  return null
+}
+
+function _orbitTrapGpuRenderKey(paletteObj) {
+  if (!paletteObj?.trapSpec) return 'null'
+  const colorPatternId = _orbitTrapColorPatternId(paletteObj) ?? ''
+  return `${_trapSpecKey(paletteObj.trapSpec)}|color:${colorPatternId}`
 }
 
 /**
@@ -426,6 +441,7 @@ class Mandelbrot {
     this.mandelbrotCustomGpu = new mcgpu.MandelbrotCustomWebGPU(this, new WorkerContext(), (error) =>
       this.gpuErrorCallback(error),
     )
+    this.orbitTrapGpu = new OrbitTrapWebGPU((error) => this.gpuErrorCallback(error))
 
     this.zoom = fxp.fromNumber(1)
     this.center = [fxp.fromNumber(-0.5), fxp.fromNumber(0)]
@@ -454,6 +470,8 @@ class Mandelbrot {
     this.jobLevel = 0
     this.viewRevision = 0
     this.activeGpuViewRevision = 0
+    this._lastOrbitTrapGpuRenderKey = null
+    this._skipOrbitTrapGpuOnce = false
   }
 
   restartWorkers() {
@@ -589,14 +607,25 @@ class Mandelbrot {
       // トラップ計算の仕様 (trapSpec) が変わった場合は再計算が必要。
       // OTパレットへの切り替え時、異なるOTパレット間の切り替え時、
       // あるいはOTパレットから通常パレットへ戻る場合にも再起動する。
-      const newTrapSpec = this.paletteComponent?.palette?.trapSpec ?? null
+      const paletteObj = this.paletteComponent?.palette
+      const newTrapSpec = paletteObj?.trapSpec ?? null
       const newTrapKey = _trapSpecKey(newTrapSpec)
-      if (newTrapKey !== this._lastTrapSpecKey) {
+      const useOrbitTrapGpu = this._canUseOrbitTrapGpu()
+      const newOrbitTrapGpuRenderKey = useOrbitTrapGpu ? _orbitTrapGpuRenderKey(paletteObj) : null
+      if (
+        newTrapKey !== this._lastTrapSpecKey ||
+        (useOrbitTrapGpu && newOrbitTrapGpuRenderKey !== this._lastOrbitTrapGpuRenderKey)
+      ) {
         // キーが異なればいずれの場合でもジョブをリセット
         this._lastTrapSpecKey = newTrapKey
+        this._lastOrbitTrapGpuRenderKey = newOrbitTrapGpuRenderKey
         this.render(true)
         return
       }
+      // Full GPU coloring does not keep CPU otData in sync, so avoid repainting
+      // the current RGBA frame through the CPU palette path.
+      if (useOrbitTrapGpu) return
+      this._lastOrbitTrapGpuRenderKey = null
       const lastScreenNr = this.jobLevel < 1 ? this.offscreens.length : this.jobLevel - 1
       for (let screenNr = 0; screenNr <= lastScreenNr; screenNr++) {
         this.offscreens[screenNr]?.render(this.palette, this.max_iter, this.smooth, this.paletteComponent.palette)
@@ -615,6 +644,30 @@ class Mandelbrot {
     this.jobToken = URL.createObjectURL(new Blob())
   }
 
+  _canUseOrbitTrapGpu(options = {}) {
+    if (this._skipOrbitTrapGpuOnce) {
+      if (options.consumeSkip) this._skipOrbitTrapGpuOnce = false
+      return false
+    }
+    const paletteObj = this.paletteComponent?.palette
+    const trapSpec = paletteObj?.trapSpec
+    if (trapSpec?.mode === 'tia') return false
+    const isSupportedOrbitTrapPalette = paletteObj?.id === 'orbit_trap_custom' || paletteObj?.id === 'orbit_trap_tia'
+    const hasSupportedTrap = trapSpec?.shape
+    const supportedFractal = this.fractalType === 'mandelbrot' || this.fractalType === 'custom'
+    // The dedicated Orbit Trap path uses direct float32 iteration. Keep very deep zooms
+    // on the existing CPU fallback where precision handling is more conservative.
+    const precisionOk = !this.requiredPrecision || this.requiredPrecision <= PRECISION_CONSTANTS.MIN_CPU_PRECISION
+    return (
+      this.useGpu &&
+      isSupportedOrbitTrapPalette &&
+      hasSupportedTrap &&
+      supportedFractal &&
+      precisionOk &&
+      this.orbitTrapGpu?.available
+    )
+  }
+
   startNextJob(resetCaches) {
     // どの描画経路でも使えるよう、先に offscreen バッファを確保する
     if (!this.offscreens || this.offscreens.length === 0) {
@@ -624,6 +677,11 @@ class Mandelbrot {
       } catch (e) {
         console.warn('startNextJob: failed to initialize offscreens', e)
       }
+    }
+
+    if (this._canUseOrbitTrapGpu({ consumeSkip: true })) {
+      this.startNextOrbitTrapGpuJob(resetCaches)
+      return
     }
 
     // Mandelbrot の GPU 経路
@@ -879,6 +937,61 @@ class Mandelbrot {
     }
   }
 
+  startNextOrbitTrapGpuJob(resetCaches) {
+    this._revokeJobToken()
+    this._createJobToken()
+
+    const screen = this.offscreens[this.offscreens.length - 1]
+    const w = screen.buffer.width
+    const h = screen.buffer.height
+
+    this.progress.start(w * h)
+    const frameTopLeft = this.canvas2complex(0, 0)
+    const roundup = (value) => Math.ceil(value / screen.scale) * screen.scale
+    const frameBottomRight = this.canvas2complex(roundup(this.width), roundup(this.height))
+    const z0Real = document.getElementById('z0-real') ? parseFloat(document.getElementById('z0-real').value) || 0 : 0
+    const z0Imag = document.getElementById('z0-imag') ? parseFloat(document.getElementById('z0-imag').value) || 0 : 0
+    const trapSpec = this.paletteComponent?.palette?.trapSpec ?? null
+    const colorPatternId = _orbitTrapColorPatternId(this.paletteComponent?.palette)
+    const paramHash = `${this.max_iter}-${this.smooth}-${this.supersampling}-${this.fractalType}-${this.iterationFunction}-${this.escapeRadius}-${z0Real}-${z0Imag}-${_trapSpecKey(trapSpec)}-${colorPatternId ?? ''}`
+
+    const task = {
+      type: 'task',
+      jobId: this.jobId,
+      jobToken: this.jobToken,
+      viewRevision: this.viewRevision,
+      pixelSize: screen.scale,
+      taskNumber: 0,
+      xOffset: 0,
+      yOffset: 0,
+      w,
+      h,
+      frameWidth: w,
+      frameHeight: h,
+      frameTopLeft,
+      frameBottomRight,
+      paramHash,
+      resetCaches,
+      skipTopLeft: false,
+      smooth: this.smooth,
+      supersampling: this.supersampling,
+      maxIter: this.max_iter,
+      precision: this.precision,
+      requiredPrecision: this.requiredPrecision,
+      fractalType: this.fractalType,
+      iterationFunction: this.iterationFunction,
+      z0: [z0Real, z0Imag],
+      z0Real,
+      z0Imag,
+      escapeRadius: this.escapeRadius,
+      trapSpec,
+      colorPatternId,
+      onUpdate: (answer) => this.onGpuUpdate(answer),
+    }
+    this.activeGpuViewRevision = task.viewRevision
+    this.orbitTrapGpu.process(task)
+  }
+
   startNextGpuJob(resetCaches) {
     this._revokeJobToken()
     this._createJobToken()
@@ -998,6 +1111,10 @@ class Mandelbrot {
       // 入力不正に気づけるようラベルへエラー表示を付ける
       setIterationFunctionLabelError(true)
       this.progress.finish()
+      if (answer.fallbackToCpu && this.orbitTrapGpu) {
+        this._skipOrbitTrapGpuOnce = true
+        this.render(true)
+      }
       return
     }
 
@@ -1012,6 +1129,24 @@ class Mandelbrot {
     }
 
     const screen = this.offscreens[this.offscreens.length - 1]
+    if (answer.rgba) {
+      if (answer.isFinished) {
+        this.progress.finish()
+      } else {
+        const progress = Math.round((this.progress.tasks - this.progress.done) / 2)
+        this.progress.update(progress)
+      }
+      screen.renderRgba(answer.rgba)
+      if (
+        !this.permalinkUpdated &&
+        (answer.isFinished || performance.now() > this.jobStartTime + ANIMATION_CONSTANTS.REDRAW_COOLDOWN)
+      ) {
+        this.permalinkUpdated = true
+        updatePermalink()
+      }
+      return
+    }
+
     screen.values.set(answer.values)
     if (this.smooth) {
       screen.smooth.set(answer.smooth)
@@ -1396,6 +1531,19 @@ class Offscreen {
     this.smoothscreen.height = this.offscreen.height
     this.smoothscreencontext = this.smoothscreen.getContext('2d')
     this.smoothbuffer = this.smoothscreencontext.createImageData(this.smoothscreen.width, this.smoothscreen.height)
+  }
+
+  renderRgba(rgba) {
+    this.buffer.data.set(rgba)
+    this.offscreencontext.putImageData(this.buffer, 0, 0)
+    this.maincontext.imageSmoothingEnabled = false
+    this.maincontext.drawImage(
+      this.offscreen,
+      0,
+      0,
+      this.offscreen.width * this.scale,
+      this.offscreen.height * this.scale,
+    )
   }
 
   render(palette, _max_iter, withSmooth, paletteObj = null) {
@@ -4103,9 +4251,10 @@ function hasDeferredGpuViewRedraw() {
 function isMainRenderGpuPath() {
   return (
     fractal.useGpu &&
-    !fractal.paletteComponent?.palette?.requiresCpu &&
-    ((fractal.fractalType === 'mandelbrot' && fractal.mandelbrotGpu?.available) ||
-      (fractal.fractalType === 'custom' && fractal.mandelbrotCustomGpu?.available))
+    (fractal._canUseOrbitTrapGpu?.() ||
+      (!fractal.paletteComponent?.palette?.requiresCpu &&
+        ((fractal.fractalType === 'mandelbrot' && fractal.mandelbrotGpu?.available) ||
+          (fractal.fractalType === 'custom' && fractal.mandelbrotCustomGpu?.available))))
   )
 }
 
@@ -4116,6 +4265,7 @@ function cancelActiveMainRender() {
     if (Array.isArray(fractal.taskqueue)) fractal.taskqueue.length = 0
     if (fractal.mandelbrotGpu) fractal.mandelbrotGpu.newTask = null
     if (fractal.mandelbrotCustomGpu) fractal.mandelbrotCustomGpu.newTask = null
+    if (fractal.orbitTrapGpu) fractal.orbitTrapGpu.newTask = null
     if (hadActiveJob) fractal.progress?.finish?.()
   } catch (e) {
     console.warn('Error canceling active fractal render:', e?.message ? e.message : e)
