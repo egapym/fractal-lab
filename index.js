@@ -396,6 +396,8 @@ class Mandelbrot {
     this.tasksLeft = 0
     this.jobId = 0
     this.jobLevel = 0
+    this.viewRevision = 0
+    this.activeGpuViewRevision = 0
   }
 
   restartWorkers() {
@@ -472,11 +474,13 @@ class Mandelbrot {
 
   setCenter(center) {
     this.center = center
+    this.viewRevision++
     this._updatePrecision()
   }
 
   setZoom(zoom) {
     this.zoom = zoom
+    this.viewRevision++
     this._updatePrecision()
   }
 
@@ -657,6 +661,7 @@ class Mandelbrot {
             frameHeight: h,
             frameTopLeft: frameTopLeft,
             frameBottomRight: frameBottomRight,
+            viewRevision: this.viewRevision,
             paramHash: paramHash,
             resetCaches: resetCaches,
             // skipTopLeft は前段結果を再利用する最適化。
@@ -735,6 +740,9 @@ class Mandelbrot {
     const task = answer.task
     if (task.jobToken !== this.jobToken) {
       return // 古い描画ジョブの結果は無視する
+    }
+    if (task.viewRevision !== this.viewRevision) {
+      return // 表示位置が変わった後に完了した古い結果は無視する
     }
     this.progress.update()
     if (answer.stats) {
@@ -834,6 +842,7 @@ class Mandelbrot {
       type: 'task',
       jobId: this.jobId,
       jobToken: this.jobToken,
+      viewRevision: this.viewRevision,
       pixelSize: screen.scale,
       taskNumber: 0,
       xOffset: 0,
@@ -856,6 +865,7 @@ class Mandelbrot {
       iterationFunction: this.iterationFunction,
       escapeRadius: this.escapeRadius,
     }
+    this.activeGpuViewRevision = task.viewRevision
     this.mandelbrotGpu.process(task)
   }
 
@@ -882,6 +892,7 @@ class Mandelbrot {
       type: 'task',
       jobId: this.jobId,
       jobToken: this.jobToken,
+      viewRevision: this.viewRevision,
       pixelSize: screen.scale,
       taskNumber: 0,
       xOffset: 0,
@@ -905,6 +916,7 @@ class Mandelbrot {
       z0: [z0Real, z0Imag],
       escapeRadius: this.escapeRadius,
     }
+    this.activeGpuViewRevision = task.viewRevision
     this.mandelbrotCustomGpu.process(task)
   }
 
@@ -915,6 +927,12 @@ class Mandelbrot {
   onGpuUpdate(answer) {
     // 現在のジョブトークンと一致しない GPU 更新は無視する
     if (answer.jobToken !== this.jobToken) {
+      return
+    }
+    if (this.activeGpuViewRevision !== this.viewRevision) {
+      if (answer.isFinished) {
+        this.progress.finish()
+      }
       return
     }
 
@@ -929,6 +947,13 @@ class Mandelbrot {
 
     // GPU 更新成功時も、ワーカー由来のエラー表示が残っているなら消さない
     if (!iterationFunctionHasError) setIterationFunctionLabelError(false)
+
+    if (hasDeferredGpuViewRedraw()) {
+      if (answer.isFinished) {
+        this.progress.finish()
+      }
+      return
+    }
 
     const screen = this.offscreens[this.offscreens.length - 1]
     screen.values.set(answer.values)
@@ -3956,6 +3981,32 @@ let _orbitPinDragged = false
 let _juliaPinDragged = false
 // let dragged = false
 
+function hasDeferredGpuViewRedraw() {
+  return pendingGpuDragRedraw || gpuGestureRedrawPending
+}
+
+function isMainRenderGpuPath() {
+  return (
+    fractal.useGpu &&
+    !fractal.paletteComponent?.palette?.requiresCpu &&
+    ((fractal.fractalType === 'mandelbrot' && fractal.mandelbrotGpu?.available) ||
+      (fractal.fractalType === 'custom' && fractal.mandelbrotCustomGpu?.available))
+  )
+}
+
+function cancelActiveMainRender() {
+  try {
+    const hadActiveJob = !!fractal.jobToken
+    fractal._revokeJobToken?.()
+    if (Array.isArray(fractal.taskqueue)) fractal.taskqueue.length = 0
+    if (fractal.mandelbrotGpu) fractal.mandelbrotGpu.newTask = null
+    if (fractal.mandelbrotCustomGpu) fractal.mandelbrotCustomGpu.newTask = null
+    if (hadActiveJob) fractal.progress?.finish?.()
+  } catch (e) {
+    console.warn('Error canceling active fractal render:', e?.message ? e.message : e)
+  }
+}
+
 const scaleFactor = 1.02 // ズームを滑らかにするため 1 スクロールあたり約 2% に抑える
 
 function zoomWithClicks(clicks, cooldown) {
@@ -4044,8 +4095,13 @@ function zoomWithFactor(factor, cooldown, options = {}) {
   fractal.setCenter(newCenter)
   fractal.setZoom(newZoom)
 
+  const deferGestureRedraw = options.gesture && isMainRenderGpuPath()
+  if (deferGestureRedraw) {
+    cancelActiveMainRender()
+  }
+
   scaleCanvas(factor, lastX, lastY)
-  if (options.gesture && fractal.useGpu) {
+  if (deferGestureRedraw) {
     scheduleGpuGestureRedraw()
   } else {
     redraw(false, cooldown)
@@ -4985,12 +5041,17 @@ function onMouseMove(evt) {
     // 複素平面上の差分 = pixelDelta / scale
     // 非常に小さい差分も残せるよう BigInt 経路で反映する
 
+    const deferDragRedraw = isMainRenderGpuPath()
+    if (deferDragRedraw) {
+      cancelActiveMainRender()
+    }
+
     applyPixelDeltaToCenter(dx, dy)
 
     panCanvas(dx, dy)
     dragStart = [lastX, lastY]
     _orbitPinDragged = true
-    if (fractal.useGpu) {
+    if (deferDragRedraw) {
       pendingGpuDragRedraw = true
       if (juliaState.active) redrawJulia()
     } else {
