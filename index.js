@@ -1956,16 +1956,39 @@ class PaletteComponent {
     const mode = modeSelect.value
     // TIA は形状を参照しないため、形状関連 UI をすべて非表示にする
     const isTia = mode === 'tia'
+    const primaryRow = document.getElementById('ot-primary-controls-row')
+    const secondaryRow = document.getElementById('ot-secondary-controls-row')
+    const shapeGroup = document.getElementById('ot-shape-group')
+    const colorPatternGroup = document.getElementById('ot-color-pattern-group')
+    const sizeGroup = document.getElementById('ot-size-group')
+    const angleGroup = document.getElementById('ot-angle-group')
 
     // Shape / Size / Center: TIA や point は無関係なので非表示
     const hideSize = isTia || shape === 'point'
-    document.getElementById('ot-shape-group')?.classList.toggle('d-none', isTia)
-    document.getElementById('ot-size-group')?.classList.toggle('d-none', hideSize)
+    shapeGroup?.classList.toggle('d-none', isTia)
+    sizeGroup?.classList.toggle('d-none', hideSize)
     document.getElementById('ot-center-group')?.classList.toggle('d-none', isTia)
+
+    // TIA のときは Color を Shape の位置へ移し、Mode と横並びにする。
+    // 通常モードへ戻ったら元の行へ戻す。
+    if (isTia) {
+      if (primaryRow && colorPatternGroup && colorPatternGroup.parentElement !== primaryRow) {
+        primaryRow.appendChild(colorPatternGroup)
+      }
+      colorPatternGroup?.classList.remove('col-4')
+      colorPatternGroup?.classList.add('col-6')
+      secondaryRow?.classList.add('d-none')
+    } else {
+      if (secondaryRow && colorPatternGroup && colorPatternGroup.parentElement !== secondaryRow) {
+        secondaryRow.insertBefore(colorPatternGroup, sizeGroup ?? angleGroup ?? null)
+      }
+      colorPatternGroup?.classList.remove('col-6')
+      colorPatternGroup?.classList.add('col-4')
+      secondaryRow?.classList.remove('d-none')
+    }
 
     // サイズラベルを調整（ラインは半長さとして扱う）。
     // point/​tia ではサイズコントロール自体が隠れているのでここでは強調不要。
-    const sizeGroup = document.getElementById('ot-size-group')
     const sizeLabel = sizeGroup?.querySelector('label')
     const sizeInput = sizeGroup?.querySelector('input')
     if (sizeLabel && sizeInput) {
@@ -1980,7 +2003,7 @@ class PaletteComponent {
 
     // Angle: 回転が意味を持つ形状かつ TIA 以外のとき表示
     const shapesWithAngle = ['line', 'parabola', 'triangle', 'square']
-    document.getElementById('ot-angle-group')?.classList.toggle('d-none', isTia || !shapesWithAngle.includes(shape))
+    angleGroup?.classList.toggle('d-none', isTia || !shapesWithAngle.includes(shape))
 
     // Bitmap group: BITMAP 選択かつ TIA 以外のとき表示
     document.getElementById('ot-bitmap-group')?.classList.toggle('d-none', isTia || shape !== 'bitmap')
