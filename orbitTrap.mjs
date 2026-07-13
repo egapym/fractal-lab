@@ -183,8 +183,12 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
       v = 0
     let bitmapSampleInBounds = false
     if (shape === TRAP_SHAPE.BITMAP && bitmapTrapWidth > 0 && bitmapTrapHeight > 0) {
-      u = dx / bitmapTrapWidth + 0.5
-      v = -(dy / bitmapTrapHeight) + 0.5
+      const cosA = Math.cos(ang)
+      const sinA = Math.sin(ang)
+      const bitmapX = dx * cosA + dy * sinA
+      const bitmapY = -dx * sinA + dy * cosA
+      u = bitmapX / bitmapTrapWidth + 0.5
+      v = -(bitmapY / bitmapTrapHeight) + 0.5
     }
     switch (shape) {
       case TRAP_SHAPE.CROSS:

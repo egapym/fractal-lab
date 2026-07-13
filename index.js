@@ -1899,7 +1899,17 @@ class PaletteComponent {
         tmpCanvas.width = w
         tmpCanvas.height = h
         const ctx = tmpCanvas.getContext('2d')
+        if (!ctx) {
+          URL.revokeObjectURL(url)
+          console.warn('Orbit Trap: ビットマップ画像の描画コンテキスト取得に失敗しました')
+          return
+        }
+        // Bitmap Image は読み込み時に左右反転して保持する。
+        ctx.save()
+        ctx.translate(w, 0)
+        ctx.scale(-1, 1)
         ctx.drawImage(img, 0, 0, w, h)
+        ctx.restore()
         const imageData = ctx.getImageData(0, 0, w, h)
         URL.revokeObjectURL(url)
 
@@ -1962,6 +1972,7 @@ class PaletteComponent {
     const colorPatternGroup = document.getElementById('ot-color-pattern-group')
     const sizeGroup = document.getElementById('ot-size-group')
     const angleGroup = document.getElementById('ot-angle-group')
+    const isBitmap = shape === 'bitmap'
 
     // Shape / Size / Center: TIA や point は無関係なので非表示
     const hideSize = isTia || shape === 'point'
@@ -1987,6 +1998,19 @@ class PaletteComponent {
       secondaryRow?.classList.remove('d-none')
     }
 
+    // Bitmap では Color が隠れるため、Size と Angle を 2 カラムで横並びにする。
+    if (isBitmap && !isTia) {
+      sizeGroup?.classList.remove('col-4')
+      sizeGroup?.classList.add('col-6')
+      angleGroup?.classList.remove('col-4')
+      angleGroup?.classList.add('col-6')
+    } else {
+      sizeGroup?.classList.remove('col-6')
+      sizeGroup?.classList.add('col-4')
+      angleGroup?.classList.remove('col-6')
+      angleGroup?.classList.add('col-4')
+    }
+
     // サイズラベルを調整（ラインは半長さとして扱う）。
     // point/​tia ではサイズコントロール自体が隠れているのでここでは強調不要。
     const sizeLabel = sizeGroup?.querySelector('label')
@@ -2002,7 +2026,7 @@ class PaletteComponent {
     }
 
     // Angle: 回転が意味を持つ形状かつ TIA 以外のとき表示
-    const shapesWithAngle = ['line', 'parabola', 'triangle', 'square']
+    const shapesWithAngle = ['line', 'parabola', 'triangle', 'square', 'bitmap']
     angleGroup?.classList.toggle('d-none', isTia || !shapesWithAngle.includes(shape))
 
     // Bitmap group: BITMAP 選択かつ TIA 以外のとき表示
