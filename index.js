@@ -1890,11 +1890,9 @@ class PaletteComponent {
       const img = new Image()
       const url = URL.createObjectURL(file)
       img.onload = () => {
-        // 最大256×256に縮小してImageDataを取得 (メモリ節約のため)
-        const MAX_SIZE = 256
-        const scale = Math.min(MAX_SIZE / img.width, MAX_SIZE / img.height, 1.0)
-        const w = Math.max(1, Math.round(img.width * scale))
-        const h = Math.max(1, Math.round(img.height * scale))
+        // 元画像の解像度を保持したまま ImageData を取得する。
+        const w = Math.max(1, img.naturalWidth || img.width)
+        const h = Math.max(1, img.naturalHeight || img.height)
         const tmpCanvas = document.createElement('canvas')
         tmpCanvas.width = w
         tmpCanvas.height = h
