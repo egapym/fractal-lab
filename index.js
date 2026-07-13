@@ -5695,7 +5695,7 @@ function resizeToCanvasSize() {
     const availViewH =
       isWideLayout && mandelbrotDiv && mandelbrotDiv.offsetHeight > 150
         ? mandelbrotDiv.offsetHeight
-        : window.innerHeight - titleH - 28 // 28 = gaps + padding
+        : window.innerHeight - titleH - 40 // 28 = gaps + padding
 
     // 幅も同様に、広いレイアウトでは offsetWidth、それ以外は viewport 幅を使う。
     const availW =
