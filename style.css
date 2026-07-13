@@ -439,8 +439,6 @@ footer {
     flex: 1 1 auto;
     min-height: 0;
     box-sizing: border-box;
-    border: 1px solid rgba(128, 128, 128, 0.4);
-    border-radius: 4px;
     overflow: hidden;
 }
 
@@ -558,8 +556,6 @@ footer {
   position: relative;
   box-sizing: border-box;
   overflow: hidden;
-  border: 1px solid rgba(128, 128, 128, 0.4);
-  border-radius: 4px;
 }
 #julia-canvas {
   display: block;
@@ -619,8 +615,6 @@ footer {
     height: auto !important;     /* 高さ 100% 指定で縦横比が崩れないようにする */
   aspect-ratio: 4 / 3 !important;
   flex: 0 0 auto !important;
-  border: 1px solid rgba(128, 128, 128, 0.4);
-  border-radius: 4px;
   overflow: hidden;
   box-sizing: border-box;
 }
