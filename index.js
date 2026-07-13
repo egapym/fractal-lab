@@ -1985,8 +1985,9 @@ class PaletteComponent {
     // Bitmap group: BITMAP 選択かつ TIA 以外のとき表示
     document.getElementById('ot-bitmap-group')?.classList.toggle('d-none', isTia || shape !== 'bitmap')
 
-    // bitmap 使用時は色が画像由来なので、color pattern は不要
-    document.getElementById('ot-color-pattern-group')?.classList.toggle('d-none', isTia || shape === 'bitmap')
+    // bitmap 使用時は色が画像由来なので color は不要。
+    // ただし TIA は shape を参照しないため、内部的に bitmap が残っていても表示する。
+    document.getElementById('ot-color-pattern-group')?.classList.toggle('d-none', !isTia && shape === 'bitmap')
 
     // Threshold 行は capture_first / distance_farthest / distance_average のときだけ表示
     const modesWithThreshold = ['capture_first', 'distance_farthest', 'distance_average']

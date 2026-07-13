@@ -515,18 +515,9 @@ export class OrbitTrapPalette {
     const [inR, inG, inB] = this.inSetColor
     const isBitmapShape = this.trapSpec?.shape === 'bitmap'
     const [bgR, bgG, bgB] = hexColorToRgb(this.trapSpec?.bitmapBackgroundColor)
-    // bitmap 形状が選ばれていて画像未読込なら背景色で描く
-    if (isBitmapShape && !this.trapSpec?.bitmapData) {
-      for (let j = 0; j < values.length; j++) {
-        bufferData[j * 4] = bgR
-        bufferData[j * 4 + 1] = bgG
-        bufferData[j * 4 + 2] = bgB
-        bufferData[j * 4 + 3] = 255
-      }
-      return
-    }
 
-    // BITMAPのとき、bitmapDataからRGB色を直接参照するかを判定
+    // BITMAP でも画像未選択の間は orbitTrap.mjs 側の距離フォールバックで通常描画を維持する。
+    // 画像があるときだけ bitmapData から RGB を直接参照する。
     const isBitmapDirect = isBitmapShape && this.trapSpec?.bitmapData
 
     for (let i = 0; i < values.length; i++) {

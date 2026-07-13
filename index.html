@@ -214,7 +214,7 @@
     <button id="ot-reset" class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2">↺</button>
   </div>
 
-  <!-- 行1: Mode と Shape -->
+  <!-- 行1: Mode / Shape -->
   <div class="mb-2 row g-2">
     <div class="col-6">
       <label for="ot-mode" class="col-form-label py-0" style="font-size:0.8em">Mode</label>
@@ -242,8 +242,16 @@
     </div>
   </div>
 
-  <!-- 行2: Size / Angle / Color Pattern -->
+  <!-- 行2: Color Pattern / Size / Angle -->
   <div class="mb-2 row g-2">
+    <div class="col-4" id="ot-color-pattern-group">
+      <label for="ot-color-pattern" class="col-form-label py-0" style="font-size:0.8em">Color</label>
+      <select id="ot-color-pattern" class="form-select form-select-sm py-0" title="着色パターンを選択">
+        <option value="cosine_rgb">Cosine RGB</option>
+        <option value="hsl_capture">HSL Capture</option>
+        <option value="tia_triangle">TIA Triangle</option>
+      </select>
+    </div>
     <div class="col-4" id="ot-size-group">
       <label for="ot-size" class="col-form-label py-0" style="font-size:0.8em">Size</label>
       <input id="ot-size" type="number" class="form-control form-control-sm py-0" value="0.5" step="0.1" min="0"
@@ -253,14 +261,6 @@
       <label for="ot-angle" class="col-form-label py-0" style="font-size:0.8em">Angle (°)</label>
       <input id="ot-angle" type="number" class="form-control form-control-sm py-0" value="0" step="15"
         title="形状の回転角 (度)" />
-    </div>
-    <div class="col-4" id="ot-color-pattern-group">
-      <label for="ot-color-pattern" class="col-form-label py-0" style="font-size:0.8em">Color</label>
-      <select id="ot-color-pattern" class="form-select form-select-sm py-0" title="着色パターンを選択">
-        <option value="cosine_rgb">Cosine RGB</option>
-        <option value="hsl_capture">HSL Capture</option>
-        <option value="tia_triangle">TIA Triangle</option>
-      </select>
     </div>
   </div>
 
