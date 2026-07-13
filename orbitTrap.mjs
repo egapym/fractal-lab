@@ -71,6 +71,7 @@ export const TRAP_MODE = {
  * @property {number}  [size=1]            - 形状サイズ (半径／辺長など)。
  *                                     - **LINE の場合は線分の半長さ**。
  *                                     - **POINT の場合は無視される**。
+ *                                     - **BITMAP の場合は画像の長辺サイズ**。
  * @property {number}  [angle=0]           - 形状の回転角 (ラジアン, line/parabola/triangle/square)
  * @property {number}  [threshold=Infinity] - 捕捉閾値
  * @property {number}  [startIter=0]       - 捕捉開始反復 (capture_first)
@@ -121,6 +122,21 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
   const sz = trapSpec.size ?? 1 // 一般的に半径や半幅。LINE では半長さ。
   const threshold = trapSpec.threshold ?? Infinity
   const startIter = trapSpec.startIter ?? 0
+  const bitmapW = trapSpec.bitmapWidth ?? 0
+  const bitmapH = trapSpec.bitmapHeight ?? 0
+  const bitmapSize = Math.abs(sz)
+  let bitmapTrapWidth = bitmapSize
+  let bitmapTrapHeight = bitmapSize
+  if (shape === TRAP_SHAPE.BITMAP && bitmapW > 0 && bitmapH > 0 && bitmapSize > 0) {
+    const bitmapAspect = bitmapW / bitmapH
+    if (bitmapAspect >= 1) {
+      bitmapTrapWidth = bitmapSize
+      bitmapTrapHeight = bitmapSize / bitmapAspect
+    } else {
+      bitmapTrapWidth = bitmapSize * bitmapAspect
+      bitmapTrapHeight = bitmapSize
+    }
+  }
 
   let zr = z0r
   let zi = z0i
@@ -164,9 +180,9 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
     // bitmap は後続のモードロジックでも u/v を使うため事前計算
     let u = 0,
       v = 0
-    if (shape === TRAP_SHAPE.BITMAP) {
-      u = dx / sz + 0.5
-      v = -(dy / sz) + 0.5
+    if (shape === TRAP_SHAPE.BITMAP && bitmapTrapWidth > 0 && bitmapTrapHeight > 0) {
+      u = dx / bitmapTrapWidth + 0.5
+      v = -(dy / bitmapTrapHeight) + 0.5
     }
     switch (shape) {
       case TRAP_SHAPE.CROSS:
@@ -252,12 +268,10 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         break
       }
       case TRAP_SHAPE.BITMAP: {
-        // ビットマップトラップ: sz×sz の範囲にマッピングしてアルファ値から距離を算出
+        // ビットマップトラップ: 画像のアスペクト比を保つ矩形にマッピングしてアルファ値から距離を算出
         const bitmapData = trapSpec.bitmapData
-        const bitmapW = trapSpec.bitmapWidth ?? 0
-        const bitmapH = trapSpec.bitmapHeight ?? 0
         // sz=0 またはデータ未設定のときは点距離にフォールバック（ゼロ除算回避）
-        if (!bitmapData || bitmapW <= 0 || bitmapH <= 0 || sz === 0) {
+        if (!bitmapData || bitmapW <= 0 || bitmapH <= 0 || bitmapTrapWidth <= 0 || bitmapTrapHeight <= 0) {
           d = Math.sqrt(dx * dx + dy * dy)
           break
         }
@@ -266,7 +280,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
           // 範囲外: タイルの境界からの距離 (正の値)
           const ex = Math.max(Math.abs(u - 0.5) - 0.5, 0)
           const ey = Math.max(Math.abs(v - 0.5) - 0.5, 0)
-          d = (Math.sqrt(ex * ex + ey * ey) + 0.01) * sz
+          d = (Math.sqrt(ex * ex + ey * ey) + 0.01) * Math.max(bitmapTrapWidth, bitmapTrapHeight)
         } else {
           // 最近傍ピクセルをサンプリングしアルファ値から距離を得る
           const px = Math.min(Math.floor(u * bitmapW), bitmapW - 1)

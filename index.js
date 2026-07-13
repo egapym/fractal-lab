@@ -35,6 +35,30 @@ function _trapSpecKey(trapSpec) {
   return JSON.stringify(rest)
 }
 
+/**
+ * Orbit Trap の Bitmap Image プレビューをアスペクト比を保って描画する。
+ * @param {HTMLCanvasElement} preview
+ * @param {HTMLCanvasElement} sourceCanvas
+ */
+function _drawOrbitTrapBitmapPreview(preview, sourceCanvas) {
+  if (!preview || !sourceCanvas || sourceCanvas.width <= 0 || sourceCanvas.height <= 0) return
+
+  const pCtx = preview.getContext('2d')
+  if (!pCtx) return
+
+  const previewW = preview.width
+  const previewH = preview.height
+  const scale = Math.min(previewW / sourceCanvas.width, previewH / sourceCanvas.height)
+  const drawW = Math.max(1, Math.round(sourceCanvas.width * scale))
+  const drawH = Math.max(1, Math.round(sourceCanvas.height * scale))
+  const dx = Math.round((previewW - drawW) / 2)
+  const dy = Math.round((previewH - drawH) / 2)
+
+  pCtx.clearRect(0, 0, previewW, previewH)
+  pCtx.imageSmoothingEnabled = false
+  pCtx.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, dx, dy, drawW, drawH)
+}
+
 // ============================================================================
 
 /**
@@ -1837,8 +1861,7 @@ class PaletteComponent {
         const preview = document.getElementById('ot-bitmap-preview')
         if (preview) {
           preview.classList.remove('d-none')
-          const pCtx = preview.getContext('2d')
-          pCtx.drawImage(tmpCanvas, 0, 0, preview.width, preview.height)
+          _drawOrbitTrapBitmapPreview(preview, tmpCanvas)
         }
 
         // trapSpecにビットマップデータを反映して再レンダリング
@@ -7244,8 +7267,7 @@ function reset() {
               imgData.data.set(savedBitmapData)
               tmpCtx.putImageData(imgData, 0, 0)
               preview.classList.remove('d-none')
-              const pCtx = preview.getContext('2d')
-              pCtx.drawImage(tmpCanvas, 0, 0, preview.width, preview.height)
+              _drawOrbitTrapBitmapPreview(preview, tmpCanvas)
             }
           } catch (previewErr) {
             console.warn('Error restoring bitmap preview in reset():', previewErr)
