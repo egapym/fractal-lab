@@ -4,10 +4,23 @@
  */
 
 import { TRAP_MODE, TRAP_SHAPE } from './orbitTrap.mjs'
+
+export const DEFAULT_BITMAP_BACKGROUND_COLOR = '#002580'
+const DEFAULT_BITMAP_BACKGROUND_RGB = [0, 37, 128]
+
+function hexColorToRgb(hex, fallback = DEFAULT_BITMAP_BACKGROUND_RGB) {
+  const color = String(hex ?? '').trim()
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(color)
+  if (!match) return fallback
+
+  const value = Number.parseInt(match[1], 16)
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255]
+}
+
 export function getPalette(id) {
-	const palette = PALETTES.find((p) => p.id === id)
-if (palette) return palette
-return ORIGINAL
+  const palette = PALETTES.find((p) => p.id === id)
+  if (palette) return palette
+  return ORIGINAL
 }
 
 export function initPallet(palette, density, rotate, _exp, max_iter) {
@@ -500,19 +513,21 @@ export class OrbitTrapPalette {
   renderPixels(bufferData, _smoothData, _values, _smooth, _signs, _lookupBuffer, _withSmooth, _zreal, _zimag, otData) {
     const values = _values
     const [inR, inG, inB] = this.inSetColor
-    // bitmap 形状が選ばれていて画像未読込なら黒一色で描く
-    if (this.trapSpec?.shape === 'bitmap' && !this.trapSpec?.bitmapData) {
+    const isBitmapShape = this.trapSpec?.shape === 'bitmap'
+    const [bgR, bgG, bgB] = hexColorToRgb(this.trapSpec?.bitmapBackgroundColor)
+    // bitmap 形状が選ばれていて画像未読込なら背景色で描く
+    if (isBitmapShape && !this.trapSpec?.bitmapData) {
       for (let j = 0; j < values.length; j++) {
-        bufferData[j * 4] = 0
-        bufferData[j * 4 + 1] = 0
-        bufferData[j * 4 + 2] = 0
+        bufferData[j * 4] = bgR
+        bufferData[j * 4 + 1] = bgG
+        bufferData[j * 4 + 2] = bgB
         bufferData[j * 4 + 3] = 255
       }
       return
     }
 
-    // BITMAP+DISTANCE_CLOSESTのとき、bitmapDataからRGB色を直接参照するかを判定
-    const isBitmapDirect = this.trapSpec?.shape === 'bitmap' && this.trapSpec?.bitmapData
+    // BITMAPのとき、bitmapDataからRGB色を直接参照するかを判定
+    const isBitmapDirect = isBitmapShape && this.trapSpec?.bitmapData
 
     for (let i = 0; i < values.length; i++) {
       const iter = values[i]
@@ -525,6 +540,14 @@ export class OrbitTrapPalette {
         continue
       }
       const val = otData[i]
+
+      if (isBitmapDirect && val >= -0.5) {
+        bufferData[i * 4] = bgR
+        bufferData[i * 4 + 1] = bgG
+        bufferData[i * 4 + 2] = bgB
+        bufferData[i * 4 + 3] = 255
+        continue
+      }
 
       // BITMAPモード全般: 負のfloatにUV座標がエンコードされている
       if (isBitmapDirect && val < -0.5) {
@@ -540,11 +563,11 @@ export class OrbitTrapPalette {
         const py = Math.min(Math.floor(v * bitmapH), bitmapH - 1)
         const idx = (py * bitmapW + px) * 4
         const alpha = bitmapData[idx + 3]
-        // 完全透明なら inSetColor にフォールバック
+        // 完全透明なら背景色にフォールバック
         if (alpha < 10) {
-          bufferData[i * 4] = inR
-          bufferData[i * 4 + 1] = inG
-          bufferData[i * 4 + 2] = inB
+          bufferData[i * 4] = bgR
+          bufferData[i * 4 + 1] = bgG
+          bufferData[i * 4 + 2] = bgB
         } else {
           bufferData[i * 4] = bitmapData[idx]
           bufferData[i * 4 + 1] = bitmapData[idx + 1]
@@ -692,6 +715,7 @@ export class CustomOrbitTrapPalette extends OrbitTrapPalette {
       ty: 0,
       size: 0.5,
       angle: 0,
+      bitmapBackgroundColor: DEFAULT_BITMAP_BACKGROUND_COLOR,
       // HTMLのot-threshold初期値(0.5)と一致させる。
       // Infinityのままにするとユーザーがモードを変えた際にUIと内部状態が乖離する。
       threshold: 0.5,
@@ -731,6 +755,7 @@ export class CustomOrbitTrapPalette extends OrbitTrapPalette {
       ty: 0,
       size: 0.5,
       angle: 0,
+      bitmapBackgroundColor: DEFAULT_BITMAP_BACKGROUND_COLOR,
       threshold: 0.5,
       startIter: 0,
       captureStep: 1,

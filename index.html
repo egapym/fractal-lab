@@ -214,8 +214,19 @@
     <button id="ot-reset" class="btn btn-sm btn-outline-secondary rounded-pill slider-reset ms-2">↺</button>
   </div>
 
-  <!-- 行1: Shape と Mode -->
+  <!-- 行1: Mode と Shape -->
   <div class="mb-2 row g-2">
+    <div class="col-6">
+      <label for="ot-mode" class="col-form-label py-0" style="font-size:0.8em">Mode</label>
+      <select id="ot-mode" class="form-select form-select-sm py-0" title="データ収集モードを選択">
+        <option value="distance_closest">Distance Closest (最近接)</option>
+        <option value="distance_farthest">Distance Farthest (最遠)</option>
+        <option value="distance_average">Distance Average (平均)</option>
+        <option value="capture_first">Capture First (初回捕捉)</option>
+        <option value="tia">TIA (三角不等式平均)</option>
+        <option value="capture_step">N-th Step (N番目の反復)</option>
+      </select>
+    </div>
     <div class="col-6" id="ot-shape-group">
       <label for="ot-shape" class="col-form-label py-0" style="font-size:0.8em">Shape</label>
       <select id="ot-shape" class="form-select form-select-sm py-0" title="トラップ形状を選択">
@@ -227,17 +238,6 @@
         <option value="triangle">Triangle</option>
         <option value="square">Square</option>
         <option value="bitmap">Bitmap Image</option>
-      </select>
-    </div>
-    <div class="col-6">
-      <label for="ot-mode" class="col-form-label py-0" style="font-size:0.8em">Mode</label>
-      <select id="ot-mode" class="form-select form-select-sm py-0" title="データ収集モードを選択">
-        <option value="distance_closest">Distance Closest (最近接)</option>
-        <option value="distance_farthest">Distance Farthest (最遠)</option>
-        <option value="distance_average">Distance Average (平均)</option>
-        <option value="capture_first">Capture First (初回捕捉)</option>
-        <option value="tia">TIA (三角不等式平均)</option>
-        <option value="capture_step">N-th Step (N番目の反復)</option>
       </select>
     </div>
   </div>
@@ -312,6 +312,13 @@
           title="Orbit trapに使用する画像を選択 (矩形領域にマッピングされます)" />
         <canvas id="ot-bitmap-preview" width="40" height="40" class="border rounded d-none"
           style="image-rendering:pixelated"></canvas>
+      </div>
+      <div class="mt-1 row g-2 align-items-end">
+        <div class="col-4">
+          <label for="ot-bitmap-bg-color" class="col-form-label py-0 d-block" style="font-size:0.8em">Background</label>
+          <input id="ot-bitmap-bg-color" type="color" class="form-control form-control-color form-control-sm w-100 p-1"
+            value="#002580" title="背景色" />
+        </div>
       </div>
     </div>
   </div>

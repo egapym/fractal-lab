@@ -59,6 +59,37 @@ function _drawOrbitTrapBitmapPreview(preview, sourceCanvas) {
   pCtx.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, dx, dy, drawW, drawH)
 }
 
+/**
+ * #RRGGBB 形式の色コードへ正規化する。
+ * @param {string} value
+ * @returns {string|null}
+ */
+function _normalizeOrbitTrapColorCode(value) {
+  const raw = String(value ?? '').trim()
+  const color = /^[0-9a-fA-F]{6}$/.test(raw) ? `#${raw}` : raw
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return null
+  return color.toUpperCase()
+}
+
+/**
+ * Bitmap Image の背景色を trapSpec から取り出す。
+ * @param {Object|null} spec
+ * @returns {string}
+ */
+function _getOrbitTrapBitmapBackgroundColor(spec) {
+  return _normalizeOrbitTrapColorCode(spec?.bitmapBackgroundColor) ?? palette.DEFAULT_BITMAP_BACKGROUND_COLOR
+}
+
+/**
+ * Bitmap Image 背景色の picker 入力を同期する。
+ * @param {string} color
+ */
+function _syncOrbitTrapBitmapBackgroundInputs(color) {
+  const normalized = _normalizeOrbitTrapColorCode(color) ?? palette.DEFAULT_BITMAP_BACKGROUND_COLOR
+  const picker = document.getElementById('ot-bitmap-bg-color')
+  if (picker) picker.value = normalized.toLowerCase()
+}
+
 // ============================================================================
 
 /**
@@ -96,6 +127,7 @@ function _applyOrbitTrapSpecToUI(spec, colorPatternId) {
   if (el('ot-start-iter')) set('ot-start-iter', spec.startIter != null ? spec.startIter : 0)
   if (el('ot-capture-step')) set('ot-capture-step', spec.captureStep != null ? spec.captureStep : 1)
   if (colorPatternId && el('ot-color-pattern')) set('ot-color-pattern', colorPatternId)
+  _syncOrbitTrapBitmapBackgroundInputs(_getOrbitTrapBitmapBackgroundColor(spec))
 
   // 一部 UI は shape/mode 依存で隠されている可能性があるため再表示
   paletteComponent._updateOrbitTrapModeVisibility()
@@ -1825,6 +1857,20 @@ class PaletteComponent {
     colorPatternSelect?.addEventListener('change', () => {
       customPalette.setColorPattern(colorPatternSelect.value)
       applyChanges()
+    })
+
+    // --- Bitmap Background ---
+    const bitmapBgColorInput = document.getElementById('ot-bitmap-bg-color')
+    const applyBitmapBackgroundColor = (value) => {
+      const color = _normalizeOrbitTrapColorCode(value)
+      if (!color) return false
+      _syncOrbitTrapBitmapBackgroundInputs(color)
+      customPalette.updateTrapSpec({ bitmapBackgroundColor: color })
+      applyChanges()
+      return true
+    }
+    bitmapBgColorInput?.addEventListener('input', () => {
+      applyBitmapBackgroundColor(bitmapBgColorInput.value)
     })
 
     // --- Orbit trap パネルのリセットボタン ---

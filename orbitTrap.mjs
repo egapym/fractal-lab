@@ -79,6 +79,7 @@ export const TRAP_MODE = {
  * @property {Uint8ClampedArray} [bitmapData]   - ビットマップ画素データ (bitmap)
  * @property {number}  [bitmapWidth=0]     - ビットマップ幅
  * @property {number}  [bitmapHeight=0]    - ビットマップ高さ
+ * @property {string}  [bitmapBackgroundColor="#002580"] - bitmap の背景色
  */
 
 /**
@@ -148,8 +149,8 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
   let dCount = 0
   let capturedResult = 0
   // BITMAP 用 UVサンプリング情報
-  let closestBitmapU = 0.5
-  let closestBitmapV = 0.5
+  let closestBitmapU = null
+  let closestBitmapV = null
   let farthestBitmapU = null
   let farthestBitmapV = null
   let avgBitmapUSum = 0
@@ -180,6 +181,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
     // bitmap は後続のモードロジックでも u/v を使うため事前計算
     let u = 0,
       v = 0
+    let bitmapSampleInBounds = false
     if (shape === TRAP_SHAPE.BITMAP && bitmapTrapWidth > 0 && bitmapTrapHeight > 0) {
       u = dx / bitmapTrapWidth + 0.5
       v = -(dy / bitmapTrapHeight) + 0.5
@@ -282,6 +284,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
           const ey = Math.max(Math.abs(v - 0.5) - 0.5, 0)
           d = (Math.sqrt(ex * ex + ey * ey) + 0.01) * Math.max(bitmapTrapWidth, bitmapTrapHeight)
         } else {
+          bitmapSampleInBounds = true
           // 最近傍ピクセルをサンプリングしアルファ値から距離を得る
           const px = Math.min(Math.floor(u * bitmapW), bitmapW - 1)
           const py = Math.min(Math.floor(v * bitmapH), bitmapH - 1)
@@ -289,11 +292,6 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
           const alpha = bitmapData[idx + 3] / 255
           // alpha=1 (不透明) → d=0, alpha=0 (透明) → d=1
           d = 1.0 - alpha
-          // DISTANCE_CLOSESTモード時は最近接点のUVも保存しておく
-          if (mode === TRAP_MODE.DISTANCE_CLOSEST && d < dClosest) {
-            closestBitmapU = u
-            closestBitmapV = v
-          }
         }
         break
       }
@@ -307,8 +305,8 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         if (d < dClosest) {
           dClosest = d
           if (shape === TRAP_SHAPE.BITMAP) {
-            closestBitmapU = u
-            closestBitmapV = v
+            closestBitmapU = bitmapSampleInBounds ? u : null
+            closestBitmapV = bitmapSampleInBounds ? v : null
           }
         }
         break
@@ -320,8 +318,8 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         if (d < threshold && d >= dFarthest) {
           dFarthest = d
           if (shape === TRAP_SHAPE.BITMAP) {
-            farthestBitmapU = u
-            farthestBitmapV = v
+            farthestBitmapU = bitmapSampleInBounds ? u : null
+            farthestBitmapV = bitmapSampleInBounds ? v : null
           }
         }
         break
@@ -331,7 +329,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         if (d < threshold) {
           dSum += d
           dCount++
-          if (shape === TRAP_SHAPE.BITMAP) {
+          if (shape === TRAP_SHAPE.BITMAP && bitmapSampleInBounds) {
             avgBitmapUSum += u
             avgBitmapVSum += v
             avgBitmapCount++
@@ -345,7 +343,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
           const strength = 1.0 - d / threshold
           // 整数部 = 反復番号, 小数部 = 強さ (0.9999 に上限クランプ)
           capturedResult = i + 1 + Math.min(strength, 0.9999)
-          if (shape === TRAP_SHAPE.BITMAP) {
+          if (shape === TRAP_SHAPE.BITMAP && bitmapSampleInBounds) {
             firstBitmapU = u
             firstBitmapV = v
           }
@@ -357,7 +355,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         const captureStep = trapSpec.captureStep ?? 1
         if (i + 1 === captureStep) {
           capturedResult = d
-          if (shape === TRAP_SHAPE.BITMAP) {
+          if (shape === TRAP_SHAPE.BITMAP && bitmapSampleInBounds) {
             stepBitmapU = u
             stepBitmapV = v
           }
@@ -374,7 +372,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
   // モード別に戻り値を決定
   switch (mode) {
     case TRAP_MODE.DISTANCE_CLOSEST:
-      if (shape === TRAP_SHAPE.BITMAP && Number.isFinite(dClosest)) {
+      if (shape === TRAP_SHAPE.BITMAP && closestBitmapU !== null) {
         return encodeUV(closestBitmapU, closestBitmapV)
       }
       return Number.isFinite(dClosest) ? dClosest : 0.0
