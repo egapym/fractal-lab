@@ -145,6 +145,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
   // 各モードの集計変数
   let dClosest = Infinity
   let dFarthest = 0
+  let dFarthestBitmap = -Infinity
   let dSum = 0
   let dCount = 0
   let capturedResult = 0
@@ -182,6 +183,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
     let u = 0,
       v = 0
     let bitmapSampleInBounds = false
+    let bitmapSampleVisible = false
     if (shape === TRAP_SHAPE.BITMAP && bitmapTrapWidth > 0 && bitmapTrapHeight > 0) {
       const cosA = Math.cos(ang)
       const sinA = Math.sin(ang)
@@ -292,6 +294,7 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
           const py = Math.min(Math.floor(v * bitmapH), bitmapH - 1)
           const idx = (py * bitmapW + px) * 4
           const alpha = bitmapData[idx + 3] / 255
+          bitmapSampleVisible = bitmapData[idx + 3] >= 10
           // alpha=1 (不透明) → d=0, alpha=0 (透明) → d=1
           d = 1.0 - alpha
         }
@@ -319,10 +322,11 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         // 値0でもUVが記録される（真に最大値が0の場合に必要）。
         if (d < threshold && d >= dFarthest) {
           dFarthest = d
-          if (shape === TRAP_SHAPE.BITMAP) {
-            farthestBitmapU = bitmapSampleInBounds ? u : null
-            farthestBitmapV = bitmapSampleInBounds ? v : null
-          }
+        }
+        if (shape === TRAP_SHAPE.BITMAP && bitmapSampleVisible && d < threshold && d >= dFarthestBitmap) {
+          dFarthestBitmap = d
+          farthestBitmapU = u
+          farthestBitmapV = v
         }
         break
 

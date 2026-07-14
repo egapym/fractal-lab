@@ -674,6 +674,7 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
   var z = zInit;
   var dClosest = 1e20;
   var dFarthest = 0.0;
+  var dFarthestBitmap = -1.0;
   var dSum = 0.0;
   var dCount = 0u;
   var captured = false;
@@ -703,6 +704,7 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
     var u = 0.0;
     var v = 0.0;
     var inBounds = false;
+    var bitmapVisible = false;
 
     if (spec.extra.x == 0u) {
       d = min(abs(dx), abs(dy)) / select(1.0, spec.trap1.x, spec.trap1.x != 0.0);
@@ -763,7 +765,9 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
       } else {
         inBounds = true;
         let pixel = sampleBitmap(u, v);
-        let alpha = f32(channelA(pixel)) / 255.0;
+        let alphaU = channelA(pixel);
+        bitmapVisible = alphaU >= 10u;
+        let alpha = f32(alphaU) / 255.0;
         d = 1.0 - alpha;
       }
     }
@@ -778,7 +782,10 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
     } else if (spec.dims.w == 1u) {
       if (d < spec.trap1.z && d >= dFarthest) {
         dFarthest = d;
-        farthestHasUv = inBounds;
+      }
+      if (spec.extra.x == 7u && bitmapVisible && d < spec.trap1.z && d >= dFarthestBitmap) {
+        dFarthestBitmap = d;
+        farthestHasUv = true;
         farthestU = u;
         farthestV = v;
       }
@@ -854,6 +861,7 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
   var z = zInit;
   var dClosest = 1e20;
   var dFarthest = 0.0;
+  var dFarthestBitmap = -1.0;
   var dSum = 0.0;
   var dCount = 0u;
   var captured = false;
@@ -884,6 +892,7 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
     var u = 0.0;
     var v = 0.0;
     var inBounds = false;
+    var bitmapVisible = false;
 
     if (spec.extra.x == 0u) {
       d = min(abs(dx), abs(dy)) / select(1.0, spec.trap1.x, spec.trap1.x != 0.0);
@@ -944,7 +953,9 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
       } else {
         inBounds = true;
         let pixel = sampleBitmap(u, v);
-        let alpha = f32(channelA(pixel)) / 255.0;
+        let alphaU = channelA(pixel);
+        bitmapVisible = alphaU >= 10u;
+        let alpha = f32(alphaU) / 255.0;
         d = 1.0 - alpha;
       }
     }
@@ -959,7 +970,10 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
     } else if (spec.dims.w == 1u) {
       if (d < spec.trap1.z && d >= dFarthest) {
         dFarthest = d;
-        farthestHasUv = inBounds;
+      }
+      if (spec.extra.x == 7u && bitmapVisible && d < spec.trap1.z && d >= dFarthestBitmap) {
+        dFarthestBitmap = d;
+        farthestHasUv = true;
         farthestU = u;
         farthestV = v;
       }
