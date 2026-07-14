@@ -23,6 +23,11 @@
     <meta property="og:url" content="https://yourdomain.com" />
     <!-- Replace with actual URL -->
     <meta property="og:site_name" content="Fractal Lab" />
+    <script>
+      if (new URLSearchParams(window.location.search).get('mode') === 'embedded') {
+        document.documentElement.classList.add('embedded-mode')
+      }
+    </script>
     <link rel="stylesheet" href="./style.css" />
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <link href="bootstrap.min.css" rel="stylesheet" />

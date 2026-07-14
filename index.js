@@ -132,6 +132,131 @@ function _syncOrbitTrapBitmapBackgroundInputs(color) {
   if (picker) picker.value = normalized.toLowerCase()
 }
 
+function _loadImageFromSrc(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('画像の読み込みに失敗しました'))
+    img.src = src
+  })
+}
+
+function _buildOrbitTrapBitmapRecordFromImage(img) {
+  const w = Math.max(1, img.naturalWidth || img.width)
+  const h = Math.max(1, img.naturalHeight || img.height)
+  const tmpCanvas = document.createElement('canvas')
+  tmpCanvas.width = w
+  tmpCanvas.height = h
+  const ctx = tmpCanvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('ビットマップ画像の描画コンテキスト取得に失敗しました')
+  }
+
+  // Bitmap Image は読み込み時に左右反転して保持する。
+  ctx.save()
+  ctx.translate(w, 0)
+  ctx.scale(-1, 1)
+  ctx.drawImage(img, 0, 0, w, h)
+  ctx.restore()
+
+  const imageData = ctx.getImageData(0, 0, w, h)
+  return {
+    bitmapData: new Uint8ClampedArray(imageData.data),
+    bitmapWidth: w,
+    bitmapHeight: h,
+    bitmapVersion: Date.now(),
+  }
+}
+
+async function _loadOrbitTrapBitmapRecordFromBlob(blob) {
+  const url = URL.createObjectURL(blob)
+  try {
+    const img = await _loadImageFromSrc(url)
+    return _buildOrbitTrapBitmapRecordFromImage(img)
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function _applyOrbitTrapBitmapRecord(customPalette, bitmapRecord) {
+  if (!customPalette || !bitmapRecord?.bitmapData || bitmapRecord.bitmapWidth <= 0 || bitmapRecord.bitmapHeight <= 0) {
+    return false
+  }
+
+  const appliedBitmapData = new Uint8ClampedArray(bitmapRecord.bitmapData)
+  customPalette.updateTrapSpec({
+    bitmapData: appliedBitmapData,
+    bitmapWidth: bitmapRecord.bitmapWidth,
+    bitmapHeight: bitmapRecord.bitmapHeight,
+    bitmapVersion: bitmapRecord.bitmapVersion ?? Date.now(),
+  })
+
+  const preview = document.getElementById('ot-bitmap-preview')
+  if (preview) {
+    preview.classList.remove('d-none')
+    _drawOrbitTrapBitmapPreviewFromImageData(
+      preview,
+      appliedBitmapData,
+      bitmapRecord.bitmapWidth,
+      bitmapRecord.bitmapHeight,
+      _getOrbitTrapBitmapBackgroundColor(customPalette.trapSpec)
+    )
+  }
+
+  return true
+}
+
+function _maybeAutoApplyQueryOrbitTrapBitmap() {
+  if (queryOrbitTrapBitmapState.autoApplied || !queryOrbitTrapBitmapState.bitmapRecord) return false
+
+  const customPalette = palette.CUSTOM_ORBIT_TRAP_PALETTE
+  if (!customPalette || paletteComponent?.palette?.id !== 'orbit_trap_custom' || customPalette.trapSpec?.shape !== 'bitmap') {
+    return false
+  }
+
+  if (!_applyOrbitTrapBitmapRecord(customPalette, queryOrbitTrapBitmapState.bitmapRecord)) return false
+
+  queryOrbitTrapBitmapState.autoApplied = true
+  if (typeof queryOrbitTrapBitmapState.applyChanges === 'function') {
+    queryOrbitTrapBitmapState.applyChanges()
+  } else {
+    paletteComponent.notifyListeners()
+    updatePermalink()
+  }
+  return true
+}
+
+async function _ensureQueryOrbitTrapBitmapLoaded() {
+  if (!queryOrbitTrapBitmapState.url) return null
+  if (queryOrbitTrapBitmapState.bitmapRecord) return queryOrbitTrapBitmapState.bitmapRecord
+  if (queryOrbitTrapBitmapState.loadPromise) return queryOrbitTrapBitmapState.loadPromise
+  if (queryOrbitTrapBitmapState.loadAttempted) return null
+
+  queryOrbitTrapBitmapState.loadAttempted = true
+  queryOrbitTrapBitmapState.loadPromise = (async () => {
+    try {
+      const response = await fetch(queryOrbitTrapBitmapState.url)
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const blob = await response.blob()
+      queryOrbitTrapBitmapState.bitmapRecord = await _loadOrbitTrapBitmapRecordFromBlob(blob)
+      _maybeAutoApplyQueryOrbitTrapBitmap()
+      return queryOrbitTrapBitmapState.bitmapRecord
+    } catch (e) {
+      console.warn(
+        `Orbit Trap: クエリパラメータ ${ORBIT_TRAP_BITMAP_URL_QUERY_KEY} の画像読み込みに失敗しました:`,
+        e?.message ? e.message : e,
+      )
+      return null
+    } finally {
+      queryOrbitTrapBitmapState.loadPromise = null
+    }
+  })()
+
+  return queryOrbitTrapBitmapState.loadPromise
+}
+
 // ============================================================================
 
 /**
@@ -209,6 +334,32 @@ const UI_DEFAULTS = {
   buddhaBrightness: 1.2,
   buddhaGamma: 4.8,
   buddhaRenderSpeed: 0,
+}
+
+const EMBEDDED_MODE = document.documentElement.classList.contains('embedded-mode')
+const ORBIT_TRAP_BITMAP_URL_QUERY_KEY = 'orbitTrapBitmapUrl'
+
+function _getOrbitTrapBitmapUrlFromQuery() {
+  try {
+    const raw = new URL(window.location.href).searchParams.get(ORBIT_TRAP_BITMAP_URL_QUERY_KEY)?.trim()
+    if (!raw) return ''
+    return new URL(raw, window.location.href).href
+  } catch (e) {
+    console.warn(
+      `Orbit Trap: クエリパラメータ ${ORBIT_TRAP_BITMAP_URL_QUERY_KEY} の解析に失敗しました:`,
+      e?.message ? e.message : e,
+    )
+    return ''
+  }
+}
+
+const queryOrbitTrapBitmapState = {
+  url: _getOrbitTrapBitmapUrlFromQuery(),
+  bitmapRecord: null,
+  loadPromise: null,
+  loadAttempted: false,
+  autoApplied: false,
+  applyChanges: null,
 }
 
 // ============================================================================
@@ -1822,8 +1973,10 @@ class PaletteComponent {
               palette.CUSTOM_ORBIT_TRAP_PALETTE._colorPatternId,
             )
           }
-          this.notifyListeners()
-          updatePermalink()
+          if (!_maybeAutoApplyQueryOrbitTrapBitmap()) {
+            this.notifyListeners()
+            updatePermalink()
+          }
         } catch (err) {
           console.warn('Error handling palette select change:', err)
         }
@@ -1940,13 +2093,16 @@ class PaletteComponent {
       // パーマリンクにも反映
       updatePermalink()
     }
+    queryOrbitTrapBitmapState.applyChanges = applyChanges
 
     // --- Shape ---
     const shapeSelect = document.getElementById('ot-shape')
     shapeSelect?.addEventListener('change', () => {
       customPalette.updateTrapSpec({ shape: shapeSelect.value })
       this._updateOrbitTrapModeVisibility()
-      applyChanges()
+      if (!_maybeAutoApplyQueryOrbitTrapBitmap()) {
+        applyChanges()
+      }
     })
 
     // --- Mode ---
@@ -2070,55 +2226,18 @@ class PaletteComponent {
 
     // --- Bitmap ファイル選択 ---
     const bitmapFileInput = document.getElementById('ot-bitmap-file')
-    bitmapFileInput?.addEventListener('change', () => {
+    bitmapFileInput?.addEventListener('change', async () => {
       const file = bitmapFileInput.files?.[0]
       if (!file) return
-      const img = new Image()
-      const url = URL.createObjectURL(file)
-      img.onload = () => {
-        // 元画像の解像度を保持したまま ImageData を取得する。
-        const w = Math.max(1, img.naturalWidth || img.width)
-        const h = Math.max(1, img.naturalHeight || img.height)
-        const tmpCanvas = document.createElement('canvas')
-        tmpCanvas.width = w
-        tmpCanvas.height = h
-        const ctx = tmpCanvas.getContext('2d')
-        if (!ctx) {
-          URL.revokeObjectURL(url)
-          console.warn('Orbit Trap: ビットマップ画像の描画コンテキスト取得に失敗しました')
-          return
-        }
-        // Bitmap Image は読み込み時に左右反転して保持する。
-        ctx.save()
-        ctx.translate(w, 0)
-        ctx.scale(-1, 1)
-        ctx.drawImage(img, 0, 0, w, h)
-        ctx.restore()
-        const imageData = ctx.getImageData(0, 0, w, h)
-        URL.revokeObjectURL(url)
-
-        // プレビューcanvasに表示 (40×40)
-        const preview = document.getElementById('ot-bitmap-preview')
-        if (preview) {
-          preview.classList.remove('d-none')
-          _drawOrbitTrapBitmapPreview(preview, tmpCanvas, _getOrbitTrapBitmapBackgroundColor(customPalette.trapSpec))
-        }
-
-        // trapSpecにビットマップデータを反映して再レンダリング
-        // bitmapVersionを更新することで_trapSpecKeyが変化し確実に再描画される
-        customPalette.updateTrapSpec({
-          bitmapData: imageData.data,
-          bitmapWidth: w,
-          bitmapHeight: h,
-          bitmapVersion: Date.now(),
-        })
+      try {
+        const bitmapRecord = await _loadOrbitTrapBitmapRecordFromBlob(file)
+        // 手動選択があれば、クエリ由来の自動適用で上書きしない。
+        queryOrbitTrapBitmapState.autoApplied = true
+        _applyOrbitTrapBitmapRecord(customPalette, bitmapRecord)
         applyChanges()
+      } catch (e) {
+        console.warn('Orbit Trap: ビットマップ画像の読み込みに失敗しました', e?.message ? e.message : e)
       }
-      img.onerror = () => {
-        URL.revokeObjectURL(url)
-        console.warn('Orbit Trap: ビットマップ画像の読み込みに失敗しました')
-      }
-      img.src = url
     })
   }
 
@@ -5725,19 +5844,23 @@ function resizeToCanvasSize() {
     // ── 非フルスクリーン Julia: 2 枚のキャンバスを縦積みで収める ──
     const mandelbrotDiv = document.getElementById('mandelbrot')
     const titleEl = document.querySelector('.site-title')
-    const titleH = titleEl ? titleEl.offsetHeight + 8 : 50
+    const titleH = EMBEDDED_MODE ? 0 : titleEl ? titleEl.offsetHeight + 8 : 50
 
     // 1412px 以上では #mandelbrot.julia-mode は CSS で高さ管理されるため、
     // offsetHeight が使える。未満では高さが内容依存なので、viewport 基準で計算する。
-    const isWideLayout = window.innerWidth >= 1412
+    const isWideLayout = !EMBEDDED_MODE && window.innerWidth >= 1412
     const availViewH =
-      isWideLayout && mandelbrotDiv && mandelbrotDiv.offsetHeight > 150
+      EMBEDDED_MODE
+        ? window.innerHeight
+        : isWideLayout && mandelbrotDiv && mandelbrotDiv.offsetHeight > 150
         ? mandelbrotDiv.offsetHeight
         : window.innerHeight - titleH - 40 // 28 = gaps + padding
 
     // 幅も同様に、広いレイアウトでは offsetWidth、それ以外は viewport 幅を使う。
     const availW =
-      isWideLayout && mandelbrotDiv && mandelbrotDiv.offsetWidth > 100
+      EMBEDDED_MODE
+        ? window.innerWidth
+        : isWideLayout && mandelbrotDiv && mandelbrotDiv.offsetWidth > 100
         ? mandelbrotDiv.offsetWidth
         : Math.min(window.innerWidth, 800)
     const canvasGap = 8 // 2 枚のキャンバスの間隔
@@ -7922,6 +8045,7 @@ function saveCanvasAsPNG() {
 // 読み込み時に URL のパーマリンクを確認する
 function init() {
   initUI()
+  _ensureQueryOrbitTrapBitmapLoaded()
   // resizeTmpCanvas()
   onResize()
   fractal.initPallete()
@@ -8021,6 +8145,7 @@ function initFromParams(params) {
           if (spec.threshold === 0) spec.threshold = Infinity
           custom.updateTrapSpec(spec)
           _applyOrbitTrapSpecToUI(spec, p.palette.colorPattern)
+          _maybeAutoApplyQueryOrbitTrapBitmap()
         }
       }
     }
