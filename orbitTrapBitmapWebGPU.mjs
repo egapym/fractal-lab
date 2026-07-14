@@ -455,6 +455,23 @@ fn toByte(value: f32) -> u32 {
   return u32(round(clamp(value, 0.0, 255.0)));
 }
 
+fn blendBitmapPixelOverBackground(pixel: u32, background: u32) -> u32 {
+  let alphaU = channelA(pixel);
+  if (alphaU < 10u) {
+    return background;
+  }
+  if (alphaU >= 255u) {
+    return packRgba(channelR(pixel), channelG(pixel), channelB(pixel), 255u);
+  }
+
+  let alpha = f32(alphaU) / 255.0;
+  let invAlpha = 1.0 - alpha;
+  let r = f32(channelR(pixel)) * alpha + f32(channelR(background)) * invAlpha;
+  let g = f32(channelG(pixel)) * alpha + f32(channelG(background)) * invAlpha;
+  let b = f32(channelB(pixel)) * alpha + f32(channelB(background)) * invAlpha;
+  return packRgba(toByte(r), toByte(g), toByte(b), 255u);
+}
+
 fn hslToRgb(h: f32, s: f32, l: f32) -> u32 {
   let rBase = fract((0.0 + 6.0 * h) / 6.0) * 6.0;
   let gBase = fract((4.0 + 6.0 * h) / 6.0) * 6.0;
@@ -742,9 +759,7 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
       v = -(bitmapY / bitmapTrapHeight) + 0.5;
 
       if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
-        let ex = max(abs(u - 0.5) - 0.5, 0.0);
-        let ey = max(abs(v - 0.5) - 0.5, 0.0);
-        d = (sqrt(ex * ex + ey * ey) + 0.01) * max(bitmapTrapWidth, bitmapTrapHeight);
+        d = 1.0;
       } else {
         inBounds = true;
         let pixel = sampleBitmap(u, v);
@@ -925,9 +940,7 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
       v = -(bitmapY / bitmapTrapHeight) + 0.5;
 
       if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
-        let ex = max(abs(u - 0.5) - 0.5, 0.0);
-        let ey = max(abs(v - 0.5) - 0.5, 0.0);
-        d = (sqrt(ex * ex + ey * ey) + 0.01) * max(bitmapTrapWidth, bitmapTrapHeight);
+        d = 1.0;
       } else {
         inBounds = true;
         let pixel = sampleBitmap(u, v);
@@ -1139,10 +1152,7 @@ fn colorFromTrap(iterValue: f32, trapValue: f32) -> u32 {
     let u = uInt / 4095.0;
     let v = vInt / 4095.0;
     let bitmapColor = sampleBitmap(u, v);
-    if (channelA(bitmapColor) < 10u) {
-      return spec.bitmap.z;
-    }
-    return packRgba(channelR(bitmapColor), channelG(bitmapColor), channelB(bitmapColor), 255u);
+    return blendBitmapPixelOverBackground(bitmapColor, spec.bitmap.z);
   }
 
   if (spec.extra.y == 1u) {

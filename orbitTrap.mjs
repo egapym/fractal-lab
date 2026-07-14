@@ -283,10 +283,8 @@ export function calculatePixelOrbitTrap(cr, ci, z0r, z0i, iterFn, maxIter, trapS
         }
         // u,v はすでに計算済み
         if (u < 0 || u > 1 || v < 0 || v > 1) {
-          // 範囲外: タイルの境界からの距離 (正の値)
-          const ex = Math.max(Math.abs(u - 0.5) - 0.5, 0)
-          const ey = Math.max(Math.abs(v - 0.5) - 0.5, 0)
-          d = (Math.sqrt(ex * ex + ey * ey) + 0.01) * Math.max(bitmapTrapWidth, bitmapTrapHeight)
+          // 画像外は矩形の輪郭をトラップ化せず、完全透明ピクセルと同じ扱いにする。
+          d = 1.0
         } else {
           bitmapSampleInBounds = true
           // 最近傍ピクセルをサンプリングしアルファ値から距離を得る

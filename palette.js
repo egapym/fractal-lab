@@ -17,6 +17,20 @@ function hexColorToRgb(hex, fallback = DEFAULT_BITMAP_BACKGROUND_RGB) {
   return [(value >> 16) & 255, (value >> 8) & 255, value & 255]
 }
 
+function blendBitmapPixelOverBackground(bitmapData, idx, bgR, bgG, bgB) {
+  const alpha = bitmapData[idx + 3]
+  if (alpha < 10) return [bgR, bgG, bgB]
+  if (alpha >= 255) return [bitmapData[idx], bitmapData[idx + 1], bitmapData[idx + 2]]
+
+  const alphaRatio = alpha / 255
+  const invAlpha = 1 - alphaRatio
+  return [
+    Math.round(bitmapData[idx] * alphaRatio + bgR * invAlpha),
+    Math.round(bitmapData[idx + 1] * alphaRatio + bgG * invAlpha),
+    Math.round(bitmapData[idx + 2] * alphaRatio + bgB * invAlpha),
+  ]
+}
+
 export function getPalette(id) {
   const palette = PALETTES.find((p) => p.id === id)
   if (palette) return palette
@@ -553,17 +567,10 @@ export class OrbitTrapPalette {
         const px = Math.min(Math.floor(u * bitmapW), bitmapW - 1)
         const py = Math.min(Math.floor(v * bitmapH), bitmapH - 1)
         const idx = (py * bitmapW + px) * 4
-        const alpha = bitmapData[idx + 3]
-        // 完全透明なら背景色にフォールバック
-        if (alpha < 10) {
-          bufferData[i * 4] = bgR
-          bufferData[i * 4 + 1] = bgG
-          bufferData[i * 4 + 2] = bgB
-        } else {
-          bufferData[i * 4] = bitmapData[idx]
-          bufferData[i * 4 + 1] = bitmapData[idx + 1]
-          bufferData[i * 4 + 2] = bitmapData[idx + 2]
-        }
+        const [outR, outG, outB] = blendBitmapPixelOverBackground(bitmapData, idx, bgR, bgG, bgB)
+        bufferData[i * 4] = outR
+        bufferData[i * 4 + 1] = outG
+        bufferData[i * 4 + 2] = outB
         bufferData[i * 4 + 3] = 255
         continue
       }
@@ -669,6 +676,7 @@ const OT_CROSS_COSINE = new OrbitTrapPalette(
   },
   makeOrbitTrapColorFn(COLOR_PATTERN.COSINE_RGB),
 )
+OT_CROSS_COSINE._colorPatternId = COLOR_PATTERN.COSINE_RGB
 
 /** orbit trap: クロストラップ + CAPTURE_FIRST + HSL着色 */
 const OT_CROSS_HSL = new OrbitTrapPalette(
@@ -684,6 +692,7 @@ const OT_CROSS_HSL = new OrbitTrapPalette(
   },
   makeOrbitTrapColorFn(COLOR_PATTERN.HSL_CAPTURE),
 )
+OT_CROSS_HSL._colorPatternId = COLOR_PATTERN.HSL_CAPTURE
 
 /** orbit trap 3.py: TIA (三角不等式平均) + 三角波輝度 + HSL */
 const OT_TIA = new OrbitTrapPalette(
@@ -692,6 +701,7 @@ const OT_TIA = new OrbitTrapPalette(
   { mode: TRAP_MODE.TIA },
   makeOrbitTrapColorFn(COLOR_PATTERN.TIA_TRIANGLE),
 )
+OT_TIA._colorPatternId = COLOR_PATTERN.TIA_TRIANGLE
 
 /**
  * UIから全パラメータをリアルタイムに変更できるカスタムOrbit trapパレット。

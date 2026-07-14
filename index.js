@@ -54,8 +54,9 @@ function _orbitTrapGpuRenderKey(paletteObj) {
  * Orbit Trap の Bitmap Image プレビューをアスペクト比を保って描画する。
  * @param {HTMLCanvasElement} preview
  * @param {HTMLCanvasElement} sourceCanvas
+ * @param {string|null} backgroundColor
  */
-function _drawOrbitTrapBitmapPreview(preview, sourceCanvas) {
+function _drawOrbitTrapBitmapPreview(preview, sourceCanvas, backgroundColor = null) {
   if (!preview || !sourceCanvas || sourceCanvas.width <= 0 || sourceCanvas.height <= 0) return
 
   const pCtx = preview.getContext('2d')
@@ -70,8 +71,34 @@ function _drawOrbitTrapBitmapPreview(preview, sourceCanvas) {
   const dy = Math.round((previewH - drawH) / 2)
 
   pCtx.clearRect(0, 0, previewW, previewH)
+  if (backgroundColor) {
+    pCtx.fillStyle = backgroundColor
+    pCtx.fillRect(0, 0, previewW, previewH)
+  }
   pCtx.imageSmoothingEnabled = false
   pCtx.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, dx, dy, drawW, drawH)
+}
+
+function _drawOrbitTrapBitmapPreviewFromImageData(
+  preview,
+  bitmapData,
+  bitmapWidth,
+  bitmapHeight,
+  backgroundColor = null
+) {
+  if (!preview || !bitmapData || bitmapWidth <= 0 || bitmapHeight <= 0) return
+
+  const tmpCanvas = document.createElement('canvas')
+  tmpCanvas.width = bitmapWidth
+  tmpCanvas.height = bitmapHeight
+  const tmpCtx = tmpCanvas.getContext('2d')
+  if (!tmpCtx) return
+
+  const imgData = tmpCtx.createImageData(bitmapWidth, bitmapHeight)
+  imgData.data.set(bitmapData)
+  tmpCtx.putImageData(imgData, 0, 0)
+  preview.classList.remove('d-none')
+  _drawOrbitTrapBitmapPreview(preview, tmpCanvas, backgroundColor)
 }
 
 /**
@@ -651,8 +678,9 @@ class Mandelbrot {
     }
     const paletteObj = this.paletteComponent?.palette
     const trapSpec = paletteObj?.trapSpec
+    const colorPatternId = _orbitTrapColorPatternId(paletteObj)
     if (trapSpec?.mode === 'tia') return false
-    const isSupportedOrbitTrapPalette = paletteObj?.id === 'orbit_trap_custom' || paletteObj?.id === 'orbit_trap_tia'
+    const isSupportedOrbitTrapPalette = trapSpec && colorPatternId != null
     const hasSupportedTrap = trapSpec?.shape
     const supportedFractal = this.fractalType === 'mandelbrot' || this.fractalType === 'custom'
     // The dedicated Orbit Trap path uses direct float32 iteration. Keep very deep zooms
@@ -2014,6 +2042,16 @@ class PaletteComponent {
       if (!color) return false
       _syncOrbitTrapBitmapBackgroundInputs(color)
       customPalette.updateTrapSpec({ bitmapBackgroundColor: color })
+      const preview = document.getElementById('ot-bitmap-preview')
+      if (preview) {
+        _drawOrbitTrapBitmapPreviewFromImageData(
+          preview,
+          customPalette.trapSpec?.bitmapData,
+          customPalette.trapSpec?.bitmapWidth ?? 0,
+          customPalette.trapSpec?.bitmapHeight ?? 0,
+          color
+        )
+      }
       applyChanges()
       return true
     }
@@ -2063,7 +2101,7 @@ class PaletteComponent {
         const preview = document.getElementById('ot-bitmap-preview')
         if (preview) {
           preview.classList.remove('d-none')
-          _drawOrbitTrapBitmapPreview(preview, tmpCanvas)
+          _drawOrbitTrapBitmapPreview(preview, tmpCanvas, _getOrbitTrapBitmapBackgroundColor(customPalette.trapSpec))
         }
 
         // trapSpecにビットマップデータを反映して再レンダリング
@@ -7501,15 +7539,13 @@ function reset() {
           try {
             const preview = document.getElementById('ot-bitmap-preview')
             if (preview && savedBitmapWidth > 0 && savedBitmapHeight > 0) {
-              const tmpCanvas = document.createElement('canvas')
-              tmpCanvas.width = savedBitmapWidth
-              tmpCanvas.height = savedBitmapHeight
-              const tmpCtx = tmpCanvas.getContext('2d')
-              const imgData = tmpCtx.createImageData(savedBitmapWidth, savedBitmapHeight)
-              imgData.data.set(savedBitmapData)
-              tmpCtx.putImageData(imgData, 0, 0)
-              preview.classList.remove('d-none')
-              _drawOrbitTrapBitmapPreview(preview, tmpCanvas)
+              _drawOrbitTrapBitmapPreviewFromImageData(
+                preview,
+                savedBitmapData,
+                savedBitmapWidth,
+                savedBitmapHeight,
+                _getOrbitTrapBitmapBackgroundColor(customOTP.trapSpec)
+              )
             }
           } catch (previewErr) {
             console.warn('Error restoring bitmap preview in reset():', previewErr)
