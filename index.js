@@ -4644,7 +4644,7 @@ function flushGpuInteractiveRedraw() {
   startGpuInteractiveRedrawNow()
 }
 
-function maybeStartTouchDragGpuRedraw() {
+function maybeStartInteractivePanGpuRedraw() {
   if (performance.now() - lastGpuInteractiveRedrawAt < GPU_INTERACTIVE_REDRAW_INTERVAL_MS) return false
   startGpuInteractiveRedrawNow()
   return true
@@ -5738,32 +5738,22 @@ function onMouseMove(evt) {
     // 非常に小さい差分も残せるよう BigInt 経路で反映する
 
     const deferDragRedraw = isMainRenderGpuPath()
-    const isTouchDrag = evt.type === 'touchmove'
 
-    if (deferDragRedraw && isTouchDrag) {
+    if (deferDragRedraw) {
       accumulateInteractivePan(dx, dy)
       trackPendingInteractivePanTransform(dx, dy)
       panCanvas(dx, dy)
       dragStart = [lastX, lastY]
       _orbitPinDragged = true
-      maybeStartTouchDragGpuRedraw()
+      maybeStartInteractivePanGpuRedraw()
       if (juliaState.active) redrawJulia()
     } else {
-      if (deferDragRedraw) {
-        cancelActiveMainRender()
-      }
-
       applyPixelDeltaToCenter(dx, dy)
 
       panCanvas(dx, dy)
       dragStart = [lastX, lastY]
       _orbitPinDragged = true
-      if (deferDragRedraw) {
-        scheduleGpuInteractiveRedraw()
-        if (juliaState.active) redrawJulia()
-      } else {
-        redraw()
-      }
+      redraw()
     }
     _refreshPinnedOrbits()
   }

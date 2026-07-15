@@ -106,6 +106,11 @@ export class OrbitTrapWebGPU {
     this.bindGroupLayout = null
     this.bitmapBuffer = null
     this.bitmapKey = null
+    this.outputResources = null
+    this.bindGroup = null
+    this.bindGroupKey = null
+    this.specArrayBuffer = new ArrayBuffer(SPEC_SIZE)
+    this.specDataView = new DataView(this.specArrayBuffer)
     this.running = Promise.resolve()
     this.currentTask = null
     this.newTask = null
@@ -128,6 +133,7 @@ export class OrbitTrapWebGPU {
         this.pipelineKey = null
         this.bindGroupLayout = null
         this._destroyBitmapBuffer()
+        this._destroyOutputResources()
         this.devicePromise = this._initGpu()
       })
       return device
@@ -201,54 +207,29 @@ export class OrbitTrapWebGPU {
         : 'vec2<f32>(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y)'
     const pipeline = await this._getPipeline(device, iterationExpr)
     const bitmapBuffer = this._ensureBitmapBuffer(device, trapSpec)
+    const resources = this._ensureOutputResources(device, task.w, task.h, bitmapBuffer)
 
-    const specBuffer = device.createBuffer({
-      size: SPEC_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    })
-    const outBuffer = device.createBuffer({
-      size: task.w * task.h * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    })
-    const readBuffer = device.createBuffer({
-      size: task.w * task.h * 4,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    })
-
-    device.queue.writeBuffer(specBuffer, 0, this._buildSpec(task, trapSpec))
-
-    const bindGroup = device.createBindGroup({
-      layout: this.bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: specBuffer } },
-        { binding: 1, resource: { buffer: outBuffer } },
-        { binding: 2, resource: { buffer: bitmapBuffer } },
-      ],
-    })
+    device.queue.writeBuffer(resources.specBuffer, 0, this._buildSpec(task, trapSpec))
 
     const encoder = device.createCommandEncoder({ label: 'orbit trap bitmap encoder' })
     const pass = encoder.beginComputePass({ label: 'orbit trap bitmap color pass' })
     pass.setPipeline(pipeline)
-    pass.setBindGroup(0, bindGroup)
+    pass.setBindGroup(0, resources.bindGroup)
     pass.dispatchWorkgroups(Math.ceil(task.w / WORKGROUP_SIZE_X), Math.ceil(task.h / WORKGROUP_SIZE_Y), 1)
     pass.end()
-    encoder.copyBufferToBuffer(outBuffer, 0, readBuffer, 0, task.w * task.h * 4)
+    encoder.copyBufferToBuffer(resources.outBuffer, 0, resources.readBuffer, 0, resources.byteSize)
     device.queue.submit([encoder.finish()])
 
-    await readBuffer.mapAsync(GPUMapMode.READ)
-    const rgba = new Uint8ClampedArray(readBuffer.getMappedRange().slice(0))
-    readBuffer.unmap()
-
-    specBuffer.destroy()
-    outBuffer.destroy()
-    readBuffer.destroy()
+    await resources.readBuffer.mapAsync(GPUMapMode.READ)
+    const rgba = new Uint8ClampedArray(resources.readBuffer.getMappedRange().slice(0, resources.byteSize))
+    resources.readBuffer.unmap()
 
     return { rgba }
   }
 
   _buildSpec(task, trapSpec) {
-    const data = new ArrayBuffer(SPEC_SIZE)
-    const view = new DataView(data)
+    const data = this.specArrayBuffer
+    const view = this.specDataView
     const frameTopLeft = task.frameTopLeft.map((v) => v.toNumber())
     const frameBottomRight = task.frameBottomRight.map((v) => v.toNumber())
     const cWidth = frameBottomRight[0] - frameTopLeft[0]
@@ -340,6 +321,48 @@ export class OrbitTrapWebGPU {
     return data
   }
 
+  _ensureOutputResources(device, width, height, bitmapBuffer) {
+    const byteSize = width * height * 4
+    const needsNewBuffers = !this.outputResources || this.outputResources.byteSize !== byteSize
+
+    if (needsNewBuffers) {
+      this._destroyOutputResources()
+      this.outputResources = {
+        byteSize,
+        specBuffer: device.createBuffer({
+          size: SPEC_SIZE,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+        outBuffer: device.createBuffer({
+          size: byteSize,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        }),
+        readBuffer: device.createBuffer({
+          size: byteSize,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+      }
+    }
+
+    const bindGroupKey = `${byteSize}:${this.bitmapKey ?? 'none'}`
+    if (!this.bindGroup || this.bindGroupKey !== bindGroupKey) {
+      this.bindGroup = device.createBindGroup({
+        layout: this.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.outputResources.specBuffer } },
+          { binding: 1, resource: { buffer: this.outputResources.outBuffer } },
+          { binding: 2, resource: { buffer: bitmapBuffer } },
+        ],
+      })
+      this.bindGroupKey = bindGroupKey
+    }
+
+    return {
+      ...this.outputResources,
+      bindGroup: this.bindGroup,
+    }
+  }
+
   _ensureBitmapBuffer(device, trapSpec) {
     const hasBitmapImage =
       trapSpec.shape === TRAP_SHAPE.BITMAP &&
@@ -384,6 +407,27 @@ export class OrbitTrapWebGPU {
     }
     this.bitmapBuffer = null
     this.bitmapKey = null
+    this.bindGroup = null
+    this.bindGroupKey = null
+  }
+
+  _destroyOutputResources() {
+    for (const buffer of [
+      this.outputResources?.specBuffer,
+      this.outputResources?.outBuffer,
+      this.outputResources?.readBuffer,
+    ]) {
+      if (!buffer) continue
+      try {
+        if (buffer.mapState === 'mapped') buffer.unmap()
+      } catch (_e) {}
+      try {
+        buffer.destroy()
+      } catch (_e) {}
+    }
+    this.outputResources = null
+    this.bindGroup = null
+    this.bindGroupKey = null
   }
 
   async _getPipeline(device, iterationExpr) {
@@ -413,6 +457,8 @@ export class OrbitTrapWebGPU {
         { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       ],
     })
+    this.bindGroup = null
+    this.bindGroupKey = null
     const layout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] })
     this.pipeline = await device.createComputePipelineAsync({
       label: 'orbit trap bitmap color pipeline',
@@ -660,15 +706,35 @@ fn computeIterValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
 }
 
 fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
+  let shapeId = spec.extra.x;
+  let trapSize = spec.trap1.x;
+  var trapSizeOrOne = 1.0;
+  if (trapSize != 0.0) {
+    trapSizeOrOne = trapSize;
+  }
+  var cosA = 1.0;
+  var sinA = 0.0;
+  if (shapeId >= 3u && shapeId <= 7u) {
+    cosA = cos(spec.trap1.y);
+    sinA = sin(spec.trap1.y);
+  }
   var bitmapTrapWidth = abs(spec.trap1.x);
   var bitmapTrapHeight = bitmapTrapWidth;
-  if (spec.extra.x == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0) {
+  if (shapeId == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0) {
     let bitmapAspect = f32(spec.bitmap.x) / f32(spec.bitmap.y);
     if (bitmapAspect >= 1.0) {
       bitmapTrapHeight = bitmapTrapWidth / bitmapAspect;
     } else {
       bitmapTrapWidth = bitmapTrapWidth * bitmapAspect;
     }
+  }
+  var bitmapInvTrapWidth = 0.0;
+  var bitmapInvTrapHeight = 0.0;
+  if (bitmapTrapWidth > 0.0) {
+    bitmapInvTrapWidth = 1.0 / bitmapTrapWidth;
+  }
+  if (bitmapTrapHeight > 0.0) {
+    bitmapInvTrapHeight = 1.0 / bitmapTrapHeight;
   }
 
   var z = zInit;
@@ -700,40 +766,34 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
 
     let dx = z.x - spec.trap0.z;
     let dy = z.y - spec.trap0.w;
-    var d = sqrt(dx * dx + dy * dy);
+    var d = 0.0;
     var u = 0.0;
     var v = 0.0;
     var inBounds = false;
     var bitmapVisible = false;
 
-    if (spec.extra.x == 0u) {
-      d = min(abs(dx), abs(dy)) / select(1.0, spec.trap1.x, spec.trap1.x != 0.0);
-    } else if (spec.extra.x == 1u) {
+    if (shapeId == 0u) {
+      d = min(abs(dx), abs(dy)) / trapSizeOrOne;
+    } else if (shapeId == 1u) {
       d = abs(sqrt(dx * dx + dy * dy) - spec.trap1.x);
-    } else if (spec.extra.x == 2u) {
+    } else if (shapeId == 2u) {
       d = sqrt(dx * dx + dy * dy);
-    } else if (spec.extra.x == 3u) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
+    } else if (shapeId == 3u) {
       let px = dx * cosA + dy * sinA;
       let py = -dx * sinA + dy * cosA;
-      let clamped = select(0.0, clamp(px, -spec.trap1.x, spec.trap1.x), spec.trap1.x != 0.0);
+      let clamped = select(0.0, clamp(px, -trapSize, trapSize), trapSize != 0.0);
       let dx2 = px - clamped;
       d = sqrt(dx2 * dx2 + py * py);
-    } else if (spec.extra.x == 4u) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
+    } else if (shapeId == 4u) {
       let lx = dx * cosA + dy * sinA;
       let ly = -dx * sinA + dy * cosA;
-      d = abs(ly - (lx * lx) / select(1.0, spec.trap1.x, spec.trap1.x != 0.0));
-    } else if (spec.extra.x == 5u) {
-      if (spec.trap1.x == 0.0) {
+      d = abs(ly - (lx * lx) / trapSizeOrOne);
+    } else if (shapeId == 5u) {
+      if (trapSize == 0.0) {
         d = sqrt(dx * dx + dy * dy);
       } else {
-        let cosA = cos(spec.trap1.y);
-        let sinA = sin(spec.trap1.y);
-        var px = (dx * cosA + dy * sinA) / spec.trap1.x;
-        var py = (-dx * sinA + dy * cosA) / spec.trap1.x;
+        var px = (dx * cosA + dy * sinA) / trapSize;
+        var py = (-dx * sinA + dy * cosA) / trapSize;
         let k = sqrt(3.0);
         px = abs(px) - 1.0;
         py = py + 1.0 / k;
@@ -743,22 +803,18 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
           px = tmpX;
         }
         px = px - clamp(px, -2.0, 0.0);
-        d = abs(sqrt(px * px + py * py) * sign(py) * spec.trap1.x);
+        d = abs(sqrt(px * px + py * py) * sign(py) * trapSize);
       }
-    } else if (spec.extra.x == 6u) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
-      let qx = abs(dx * cosA + dy * sinA) - spec.trap1.x;
-      let qy = abs(-dx * sinA + dy * cosA) - spec.trap1.x;
+    } else if (shapeId == 6u) {
+      let qx = abs(dx * cosA + dy * sinA) - trapSize;
+      let qy = abs(-dx * sinA + dy * cosA) - trapSize;
       d = sqrt(max(qx, 0.0) * max(qx, 0.0) + max(qy, 0.0) * max(qy, 0.0)) + min(max(qx, qy), 0.0);
       d = abs(d);
-    } else if (spec.extra.x == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0 && bitmapTrapHeight > 0.0) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
+    } else if (shapeId == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0 && bitmapTrapHeight > 0.0) {
       let bitmapX = dx * cosA + dy * sinA;
       let bitmapY = -dx * sinA + dy * cosA;
-      u = bitmapX / bitmapTrapWidth + 0.5;
-      v = -(bitmapY / bitmapTrapHeight) + 0.5;
+      u = bitmapX * bitmapInvTrapWidth + 0.5;
+      v = -(bitmapY * bitmapInvTrapHeight) + 0.5;
 
       if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
         d = 1.0;
@@ -783,7 +839,7 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
       if (d < spec.trap1.z && d >= dFarthest) {
         dFarthest = d;
       }
-      if (spec.extra.x == 7u && bitmapVisible && d < spec.trap1.z && d >= dFarthestBitmap) {
+      if (shapeId == 7u && bitmapVisible && d < spec.trap1.z && d >= dFarthestBitmap) {
         dFarthestBitmap = d;
         farthestHasUv = true;
         farthestU = u;
@@ -847,15 +903,35 @@ fn computeTrapValue(zInit: vec2<f32>, c: vec2<f32>) -> f32 {
 }
 
 fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
+  let shapeId = spec.extra.x;
+  let trapSize = spec.trap1.x;
+  var trapSizeOrOne = 1.0;
+  if (trapSize != 0.0) {
+    trapSizeOrOne = trapSize;
+  }
+  var cosA = 1.0;
+  var sinA = 0.0;
+  if (shapeId >= 3u && shapeId <= 7u) {
+    cosA = cos(spec.trap1.y);
+    sinA = sin(spec.trap1.y);
+  }
   var bitmapTrapWidth = abs(spec.trap1.x);
   var bitmapTrapHeight = bitmapTrapWidth;
-  if (spec.extra.x == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0) {
+  if (shapeId == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0) {
     let bitmapAspect = f32(spec.bitmap.x) / f32(spec.bitmap.y);
     if (bitmapAspect >= 1.0) {
       bitmapTrapHeight = bitmapTrapWidth / bitmapAspect;
     } else {
       bitmapTrapWidth = bitmapTrapWidth * bitmapAspect;
     }
+  }
+  var bitmapInvTrapWidth = 0.0;
+  var bitmapInvTrapHeight = 0.0;
+  if (bitmapTrapWidth > 0.0) {
+    bitmapInvTrapWidth = 1.0 / bitmapTrapWidth;
+  }
+  if (bitmapTrapHeight > 0.0) {
+    bitmapInvTrapHeight = 1.0 / bitmapTrapHeight;
   }
 
   var z = zInit;
@@ -888,40 +964,34 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
 
     let dx = zVec.x - spec.trap0.z;
     let dy = zVec.y - spec.trap0.w;
-    var d = sqrt(dx * dx + dy * dy);
+    var d = 0.0;
     var u = 0.0;
     var v = 0.0;
     var inBounds = false;
     var bitmapVisible = false;
 
-    if (spec.extra.x == 0u) {
-      d = min(abs(dx), abs(dy)) / select(1.0, spec.trap1.x, spec.trap1.x != 0.0);
-    } else if (spec.extra.x == 1u) {
+    if (shapeId == 0u) {
+      d = min(abs(dx), abs(dy)) / trapSizeOrOne;
+    } else if (shapeId == 1u) {
       d = abs(sqrt(dx * dx + dy * dy) - spec.trap1.x);
-    } else if (spec.extra.x == 2u) {
+    } else if (shapeId == 2u) {
       d = sqrt(dx * dx + dy * dy);
-    } else if (spec.extra.x == 3u) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
+    } else if (shapeId == 3u) {
       let px = dx * cosA + dy * sinA;
       let py = -dx * sinA + dy * cosA;
-      let clamped = select(0.0, clamp(px, -spec.trap1.x, spec.trap1.x), spec.trap1.x != 0.0);
+      let clamped = select(0.0, clamp(px, -trapSize, trapSize), trapSize != 0.0);
       let dx2 = px - clamped;
       d = sqrt(dx2 * dx2 + py * py);
-    } else if (spec.extra.x == 4u) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
+    } else if (shapeId == 4u) {
       let lx = dx * cosA + dy * sinA;
       let ly = -dx * sinA + dy * cosA;
-      d = abs(ly - (lx * lx) / select(1.0, spec.trap1.x, spec.trap1.x != 0.0));
-    } else if (spec.extra.x == 5u) {
-      if (spec.trap1.x == 0.0) {
+      d = abs(ly - (lx * lx) / trapSizeOrOne);
+    } else if (shapeId == 5u) {
+      if (trapSize == 0.0) {
         d = sqrt(dx * dx + dy * dy);
       } else {
-        let cosA = cos(spec.trap1.y);
-        let sinA = sin(spec.trap1.y);
-        var px = (dx * cosA + dy * sinA) / spec.trap1.x;
-        var py = (-dx * sinA + dy * cosA) / spec.trap1.x;
+        var px = (dx * cosA + dy * sinA) / trapSize;
+        var py = (-dx * sinA + dy * cosA) / trapSize;
         let k = sqrt(3.0);
         px = abs(px) - 1.0;
         py = py + 1.0 / k;
@@ -931,22 +1001,18 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
           px = tmpX;
         }
         px = px - clamp(px, -2.0, 0.0);
-        d = abs(sqrt(px * px + py * py) * sign(py) * spec.trap1.x);
+        d = abs(sqrt(px * px + py * py) * sign(py) * trapSize);
       }
-    } else if (spec.extra.x == 6u) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
-      let qx = abs(dx * cosA + dy * sinA) - spec.trap1.x;
-      let qy = abs(-dx * sinA + dy * cosA) - spec.trap1.x;
+    } else if (shapeId == 6u) {
+      let qx = abs(dx * cosA + dy * sinA) - trapSize;
+      let qy = abs(-dx * sinA + dy * cosA) - trapSize;
       d = sqrt(max(qx, 0.0) * max(qx, 0.0) + max(qy, 0.0) * max(qy, 0.0)) + min(max(qx, qy), 0.0);
       d = abs(d);
-    } else if (spec.extra.x == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0 && bitmapTrapHeight > 0.0) {
-      let cosA = cos(spec.trap1.y);
-      let sinA = sin(spec.trap1.y);
+    } else if (shapeId == 7u && spec.bitmap.x > 0u && spec.bitmap.y > 0u && bitmapTrapWidth > 0.0 && bitmapTrapHeight > 0.0) {
       let bitmapX = dx * cosA + dy * sinA;
       let bitmapY = -dx * sinA + dy * cosA;
-      u = bitmapX / bitmapTrapWidth + 0.5;
-      v = -(bitmapY / bitmapTrapHeight) + 0.5;
+      u = bitmapX * bitmapInvTrapWidth + 0.5;
+      v = -(bitmapY * bitmapInvTrapHeight) + 0.5;
 
       if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
         d = 1.0;
@@ -971,7 +1037,7 @@ fn computeTrapValueMandelbrotDs(zInit: Ds2, c: Ds2) -> f32 {
       if (d < spec.trap1.z && d >= dFarthest) {
         dFarthest = d;
       }
-      if (spec.extra.x == 7u && bitmapVisible && d < spec.trap1.z && d >= dFarthestBitmap) {
+      if (shapeId == 7u && bitmapVisible && d < spec.trap1.z && d >= dFarthestBitmap) {
         dFarthestBitmap = d;
         farthestHasUv = true;
         farthestU = u;
