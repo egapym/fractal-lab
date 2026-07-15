@@ -3628,6 +3628,9 @@ const fractal = new Mandelbrot(canvasElement, new ProgressMonitor(progressElemen
 // ---------- detail popup state -----------------------------------
 let detailPopup = null
 let detailEnabled = false
+let detailHoverState = null
+let detailPinnedState = null
+const DETAIL_TOUCH_TOGGLE_DISTANCE = 20
 
 // 少数桁をそろえて表示する簡易フォーマッタ
 function _fmt(num) {
@@ -4588,6 +4591,11 @@ function zoomWithFactor(factor, cooldown, options = {}) {
   // 新しい中心座標とズームを反映する
   fractal.setCenter(newCenter)
   fractal.setZoom(newZoom)
+  if (detailPinnedState) {
+    clearPinnedDetailPopup()
+  } else if (detailHoverState) {
+    _renderDetailIndicator()
+  }
 
   const deferGestureRedraw = options.gesture && isMainRenderGpuPath()
   if (deferGestureRedraw) {
@@ -4667,6 +4675,11 @@ function handleJuliaScroll(evt) {
   const offsetY = ptr[1].subtract(renderer.center[1].withScale(p)).multiply(invFactor)
   renderer.center = [ptr[0].subtract(offsetX), ptr[1].subtract(offsetY)]
   renderer.zoom = newZoom
+  if (detailPinnedState) {
+    clearPinnedDetailPopup()
+  } else if (detailHoverState) {
+    _renderDetailIndicator()
+  }
 
   redrawJulia()
   _refreshPinnedOrbits()
@@ -4709,6 +4722,7 @@ function _juliaDocMouseMove(evt) {
 
   const dx = x - juliaDragStart[0]
   const dy = y - juliaDragStart[1]
+  if (detailPinnedState) clearPinnedDetailPopup()
 
   const p = renderer.precision
   const w_fx = fxp.fromNumber(renderer.width, p)
@@ -5203,6 +5217,10 @@ function _paintOrbitOnCtx(
 
   // 直接計算した CSS 座標があれば使い、深いズーム時の Float64 桁落ちを避ける
   const [cx, cy] = directCx !== null ? [directCx, directCy] : complexToScreen(crosshairRe, crosshairIm)
+  _paintCrosshairOnCtx(ctx, cx, cy)
+}
+
+function _paintCrosshairOnCtx(ctx, cx, cy) {
   ctx.strokeStyle = 'rgba(255, 240, 60, 0.9)'
   ctx.lineWidth = 1.5
   const s = 5
@@ -5595,6 +5613,7 @@ function onMouseMove(evt) {
   }
 
   if (dragStart) {
+    if (detailPinnedState) clearPinnedDetailPopup()
     // stopBuddhaPreserveDisplay は runner 実行中だけ呼ぶ。
     // 停止後に呼ぶと density がキャンバスへ描かれ、パンのたびに
     // Buddhabrot がフラクタルの上へ一瞬重なって見える。
@@ -5797,28 +5816,149 @@ function hideDetailPopup() {
   if (detailPopup) detailPopup.hidden = true
 }
 
+function _getDetailCrosshairCanvas(isJulia) {
+  return document.getElementById(isJulia ? 'julia-detail-crosshair-canvas' : 'detail-crosshair-canvas')
+}
+
+function _getDetailOwnerCanvas(isJulia) {
+  return isJulia ? juliaCanvasElement : canvasElement
+}
+
+function _clearDetailCrosshairCanvas(isJulia) {
+  const canvas = _getDetailCrosshairCanvas(isJulia)
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+}
+
+function _clearDetailCrosshairs() {
+  _clearDetailCrosshairCanvas(false)
+  _clearDetailCrosshairCanvas(true)
+}
+
+function _getActiveDetailState() {
+  return detailPinnedState || detailHoverState
+}
+
+function _drawDetailCrosshairAtClient(clientX, clientY, isJulia) {
+  const overlayCanvas = _getDetailCrosshairCanvas(isJulia)
+  const ownerCanvas = _getDetailOwnerCanvas(isJulia)
+  if (!overlayCanvas || !ownerCanvas) return false
+
+  const ow = overlayCanvas.offsetWidth
+  const oh = overlayCanvas.offsetHeight
+  if (ow < 1 || oh < 1) return false
+  if (overlayCanvas.width !== ow || overlayCanvas.height !== oh) {
+    overlayCanvas.width = ow
+    overlayCanvas.height = oh
+  }
+
+  const rect = ownerCanvas.getBoundingClientRect()
+  const cw = rect.width || ownerCanvas.offsetWidth || 1
+  const ch = rect.height || ownerCanvas.offsetHeight || 1
+  const cssX = ((clientX - rect.left) / cw) * ow
+  const cssY = ((clientY - rect.top) / ch) * oh
+
+  const ctx = overlayCanvas.getContext('2d')
+  ctx.clearRect(0, 0, ow, oh)
+  _paintCrosshairOnCtx(ctx, cssX, cssY)
+  return true
+}
+
+function _renderDetailIndicator() {
+  _clearDetailCrosshairs()
+  if (!detailEnabled) {
+    hideDetailPopup()
+    return
+  }
+
+  const state = _getActiveDetailState()
+  if (!state) {
+    hideDetailPopup()
+    return
+  }
+
+  if (!_showComputedDetailPopupAt(state.clientX, state.clientY, state.isJulia)) {
+    if (detailPinnedState === state) detailPinnedState = null
+    if (detailHoverState === state) detailHoverState = null
+    hideDetailPopup()
+    return
+  }
+
+  if (detailPinnedState === state) {
+    _drawDetailCrosshairAtClient(state.clientX, state.clientY, state.isJulia)
+  }
+}
+
+function _setDetailHoverState(clientX, clientY, isJulia) {
+  detailHoverState = { clientX, clientY, isJulia }
+  _renderDetailIndicator()
+}
+
+function _clearDetailHoverState() {
+  detailHoverState = null
+  _renderDetailIndicator()
+}
+
+function clearAllDetailIndicators() {
+  detailHoverState = null
+  detailPinnedState = null
+  _renderDetailIndicator()
+}
+
+function clearPinnedDetailPopup() {
+  detailPinnedState = null
+  _renderDetailIndicator()
+}
+
+function _showComputedDetailPopupAt(clientX, clientY, isJulia) {
+  const info = computeMouseDetails(clientX, clientY, isJulia)
+  if (!info) return false
+  showDetailPopup(formatDetailInfo(info), clientX, clientY)
+  return true
+}
+
+function _togglePinnedDetailPopupAt(clientX, clientY, isJulia) {
+  if (
+    detailPinnedState &&
+    detailPinnedState.isJulia === isJulia &&
+    Math.hypot(clientX - detailPinnedState.clientX, clientY - detailPinnedState.clientY) < DETAIL_TOUCH_TOGGLE_DISTANCE
+  ) {
+    clearPinnedDetailPopup()
+    return
+  }
+  detailPinnedState = { clientX, clientY, isJulia }
+  _renderDetailIndicator()
+}
+
 function initDetailsFeature() {
   detailPopup = document.getElementById('detail-popup') || null
   const detailToggle = document.getElementById('detail-toggle')
   if (detailToggle) {
     detailToggle.addEventListener('change', (e) => {
       detailEnabled = e.target.checked
-      if (!detailEnabled) hideDetailPopup()
+      if (!detailEnabled) {
+        clearAllDetailIndicators()
+      } else {
+        _renderDetailIndicator()
+      }
     })
   }
   canvasElement.addEventListener('mousemove', (evt) => {
-    if (!detailEnabled) return
-    const info = computeMouseDetails(evt.clientX, evt.clientY, false)
-    if (info) showDetailPopup(formatDetailInfo(info), evt.clientX, evt.clientY)
+    if (!detailEnabled || detailPinnedState) return
+    _setDetailHoverState(evt.clientX, evt.clientY, false)
   })
-  canvasElement.addEventListener('mouseout', hideDetailPopup)
+  canvasElement.addEventListener('mouseout', () => {
+    if (!detailPinnedState) _clearDetailHoverState()
+  })
   if (juliaCanvasElement) {
     juliaCanvasElement.addEventListener('mousemove', (evt) => {
-      if (!detailEnabled) return
-      const info = computeMouseDetails(evt.clientX, evt.clientY, true)
-      if (info) showDetailPopup(formatDetailInfo(info), evt.clientX, evt.clientY)
+      if (!detailEnabled || detailPinnedState) return
+      _setDetailHoverState(evt.clientX, evt.clientY, true)
     })
-    juliaCanvasElement.addEventListener('mouseout', hideDetailPopup)
+    juliaCanvasElement.addEventListener('mouseout', () => {
+      if (!detailPinnedState) _clearDetailHoverState()
+    })
   }
 }
 
@@ -6402,6 +6542,7 @@ function initListeners() {
           const [x, y] = _juliaCanvasCoordsFromClient(evt.touches[0].clientX, evt.touches[0].clientY)
           const dx = x - juliaDragStart[0]
           const dy = y - juliaDragStart[1]
+          if (detailPinnedState) clearPinnedDetailPopup()
 
           const p = renderer.precision
           const w_fx = fxp.fromNumber(renderer.width, p)
@@ -6447,6 +6588,7 @@ function initListeners() {
           const [newCenterX, newCenterY] = _juliaCanvasCoordsFromClient(newTouchCenter[0], newTouchCenter[1])
           const dx = newCenterX - lastCenterX
           const dy = newCenterY - lastCenterY
+          if (detailPinnedState) clearPinnedDetailPopup()
           const w_fx = fxp.fromNumber(renderer.width, p)
           const scale_fx = renderer.zoom.withScale(p).multiply(w_fx).divide(fxp.fromNumber(4, p))
           const dxFx = fxp.fromNumber(-dx, p).divide(scale_fx)
@@ -6480,6 +6622,9 @@ function initListeners() {
       if (orbitDrawEnabled && touch && !_juliaPinDragged && juliaState.active) {
         suppressJuliaOrbitClickUntil = performance.now() + TOUCH_CLICK_SUPPRESS_MS
         _togglePinnedJuliaOrbitAtClient(touch.clientX, touch.clientY)
+      }
+      if (detailEnabled && touch && !_juliaPinDragged && juliaState.active) {
+        _togglePinnedDetailPopupAt(touch.clientX, touch.clientY, true)
       }
     })
     juliaCanvasElement.addEventListener('touchcancel', () => {
@@ -6576,6 +6721,9 @@ function initListeners() {
     if (orbitDrawEnabled && touch && !_orbitPinDragged) {
       suppressOrbitClickUntil = performance.now() + TOUCH_CLICK_SUPPRESS_MS
       _togglePinnedOrbitAtClient(touch.clientX, touch.clientY)
+    }
+    if (detailEnabled && touch && !_orbitPinDragged) {
+      _togglePinnedDetailPopupAt(touch.clientX, touch.clientY, false)
     }
     // evt.preventDefault()
   })

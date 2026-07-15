@@ -177,7 +177,9 @@ html.embedded-mode #mandelbrot-canvas {
 }
 
 #orbit-canvas,
-#julia-orbit-canvas {
+#julia-orbit-canvas,
+#detail-crosshair-canvas,
+#julia-detail-crosshair-canvas {
     position: absolute;
     top: 0;
     left: 0;
@@ -185,6 +187,11 @@ html.embedded-mode #mandelbrot-canvas {
     height: 100%;
     pointer-events: none;
     z-index: 2;
+}
+
+#detail-crosshair-canvas,
+#julia-detail-crosshair-canvas {
+    z-index: 3;
 }
 
 #menu-toggle {
