@@ -707,6 +707,8 @@ class Mandelbrot {
     this.jobLevel = 0
     this.viewRevision = 0
     this.activeGpuViewRevision = 0
+    this.interactiveGpuRedraw = false
+    this.currentInteractionGpuRedraw = false
     this._lastOrbitTrapGpuRenderKey = null
     this._skipOrbitTrapGpuOnce = false
   }
@@ -1222,6 +1224,7 @@ class Mandelbrot {
       z0Real,
       z0Imag,
       escapeRadius: this.escapeRadius,
+      animationQuick: this.currentInteractionGpuRedraw,
       trapSpec,
       colorPatternId,
       onUpdate: (answer) => this.onGpuUpdate(answer),
@@ -1271,6 +1274,7 @@ class Mandelbrot {
       fractalType: this.fractalType,
       iterationFunction: this.iterationFunction,
       escapeRadius: this.escapeRadius,
+      animationQuick: this.currentInteractionGpuRedraw,
     }
     this.activeGpuViewRevision = task.viewRevision
     this.mandelbrotGpu.process(task)
@@ -1322,6 +1326,7 @@ class Mandelbrot {
       iterationFunction: this.iterationFunction,
       z0: [z0Real, z0Imag],
       escapeRadius: this.escapeRadius,
+      animationQuick: this.currentInteractionGpuRedraw,
     }
     this.activeGpuViewRevision = task.viewRevision
     this.mandelbrotCustomGpu.process(task)
@@ -1427,6 +1432,8 @@ class Mandelbrot {
     this.jobLevel = -1
     this.jobStartTime = performance.now()
     this.permalinkUpdated = false
+    this.currentInteractionGpuRedraw = !!this.interactiveGpuRedraw
+    this.interactiveGpuRedraw = false
     this.resetStats()
     // console.log('Rendering...')
     this.startNextJob(resetCaches)
@@ -4447,13 +4454,12 @@ function fxpToDecimalString(fxp, precision) {
 let lastX = canvasElement.width / 2
 let lastY = canvasElement.height / 2
 let dragStart = null
-let pendingGpuDragRedraw = false
 let juliaDragStart = null
 let juliaLastTouchDistance = null
 let juliaLastTouchCenter = null
-let gpuGestureRedrawTimer = null
-let gpuGestureRedrawPending = false
-let lastGpuGestureRedrawAt = 0
+let gpuInteractiveRedrawTimer = null
+let gpuInteractiveRedrawPending = false
+let lastGpuInteractiveRedrawAt = 0
 let orbitDrawEnabled = false // 軌道表示が有効か
 let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
 // 軌道の固定表示。キャンバスをクリックすると、その点に軌道を固定する。
@@ -4472,7 +4478,7 @@ const TOUCH_CLICK_SUPPRESS_MS = 700
 // let dragged = false
 
 function hasDeferredGpuViewRedraw() {
-  return pendingGpuDragRedraw || gpuGestureRedrawPending
+  return gpuInteractiveRedrawPending
 }
 
 function isMainRenderGpuPath() {
@@ -4510,29 +4516,31 @@ function getWheelZoomDelta(evt) {
   return INVERT_SCROLL ? delta : -delta
 }
 
-function scheduleGpuGestureRedraw() {
-  gpuGestureRedrawPending = true
+function scheduleGpuInteractiveRedraw() {
+  gpuInteractiveRedrawPending = true
   const now = performance.now()
-  const MIN_GPU_GESTURE_REDRAW_INTERVAL = 120
-  const wait = Math.max(0, MIN_GPU_GESTURE_REDRAW_INTERVAL - (now - lastGpuGestureRedrawAt))
-  if (gpuGestureRedrawTimer != null) return
-  gpuGestureRedrawTimer = setTimeout(() => {
-    gpuGestureRedrawTimer = null
-    if (!gpuGestureRedrawPending) return
-    gpuGestureRedrawPending = false
-    lastGpuGestureRedrawAt = performance.now()
+  const MIN_GPU_INTERACTIVE_REDRAW_INTERVAL = 120
+  const wait = Math.max(0, MIN_GPU_INTERACTIVE_REDRAW_INTERVAL - (now - lastGpuInteractiveRedrawAt))
+  if (gpuInteractiveRedrawTimer != null) return
+  gpuInteractiveRedrawTimer = setTimeout(() => {
+    gpuInteractiveRedrawTimer = null
+    if (!gpuInteractiveRedrawPending) return
+    gpuInteractiveRedrawPending = false
+    lastGpuInteractiveRedrawAt = performance.now()
+    fractal.interactiveGpuRedraw = true
     redraw(false, 0)
   }, wait)
 }
 
-function flushGpuGestureRedraw() {
-  if (gpuGestureRedrawTimer != null) {
-    clearTimeout(gpuGestureRedrawTimer)
-    gpuGestureRedrawTimer = null
+function flushGpuInteractiveRedraw() {
+  if (gpuInteractiveRedrawTimer != null) {
+    clearTimeout(gpuInteractiveRedrawTimer)
+    gpuInteractiveRedrawTimer = null
   }
-  if (!gpuGestureRedrawPending) return
-  gpuGestureRedrawPending = false
-  lastGpuGestureRedrawAt = performance.now()
+  if (!gpuInteractiveRedrawPending) return
+  gpuInteractiveRedrawPending = false
+  lastGpuInteractiveRedrawAt = performance.now()
+  fractal.interactiveGpuRedraw = true
   redraw(false, 0)
 }
 
@@ -4604,7 +4612,7 @@ function zoomWithFactor(factor, cooldown, options = {}) {
 
   scaleCanvas(factor, lastX, lastY)
   if (deferGestureRedraw) {
-    scheduleGpuGestureRedraw()
+    scheduleGpuInteractiveRedraw()
   } else {
     redraw(false, cooldown)
   }
@@ -5550,7 +5558,6 @@ function onMouseDown(evt) {
     if (buddhaActive) return
   }
   _orbitPinDragged = false
-  pendingGpuDragRedraw = false
   updateMousePos(evt)
   dragStart = [lastX, lastY]
 }
@@ -5604,9 +5611,8 @@ function onMouseMove(evt) {
   updateMousePos(evt)
   if (evt.type === 'mousemove' && (evt.buttons & 1) === 0) {
     // 外からキャンバスへ入ったときの意図しないドラッグ開始を防ぐ
-    if (pendingGpuDragRedraw) {
-      pendingGpuDragRedraw = false
-      redraw()
+    if (gpuInteractiveRedrawPending) {
+      flushGpuInteractiveRedraw()
     }
     dragStart = null
     return
@@ -5657,7 +5663,7 @@ function onMouseMove(evt) {
     dragStart = [lastX, lastY]
     _orbitPinDragged = true
     if (deferDragRedraw) {
-      pendingGpuDragRedraw = true
+      scheduleGpuInteractiveRedraw()
       if (juliaState.active) redrawJulia()
     } else {
       redraw()
@@ -5693,10 +5699,7 @@ function panCanvas(dx, dy) {
 function onMouseUp(evt) {
   updateMousePos(evt)
   dragStart = null
-  if (pendingGpuDragRedraw) {
-    pendingGpuDragRedraw = false
-    redraw()
-  }
+  flushGpuInteractiveRedraw()
 }
 
 function updateMousePos(evt) {
@@ -6716,7 +6719,7 @@ function initListeners() {
     onMouseUp(evt)
     lastTouchDistance = null
     lastTouchCenter = null
-    flushGpuGestureRedraw()
+    flushGpuInteractiveRedraw()
     orbitTouchTapCandidate = false
     if (orbitDrawEnabled && touch && !_orbitPinDragged) {
       suppressOrbitClickUntil = performance.now() + TOUCH_CLICK_SUPPRESS_MS
@@ -6732,7 +6735,7 @@ function initListeners() {
     lastTouchDistance = null
     lastTouchCenter = null
     orbitTouchTapCandidate = false
-    flushGpuGestureRedraw()
+    flushGpuInteractiveRedraw()
   })
 
   DOM.iterations.addEventListener('change', (event) => {
