@@ -337,7 +337,66 @@ const UI_DEFAULTS = {
 }
 
 const EMBEDDED_MODE = document.documentElement.classList.contains('embedded-mode')
+const EMBEDDED_INITIAL_ZOOM_CORRECTION = {
+  standardAspect: 4 / 3,
+  standardFactor: 1,
+  narrowAspect: 430 / 932,
+  narrowFactor: 1.3,
+  minFactor: 0.7,
+  maxFactor: 2,
+}
+const INVERT_SCROLL_QUERY_KEY = 'invertScroll'
 const ORBIT_TRAP_BITMAP_URL_QUERY_KEY = 'orbitTrapBitmapUrl'
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function getBooleanQueryParam(key, defaultValue = false) {
+  try {
+    const raw = new URL(window.location.href).searchParams.get(key)
+    if (raw == null) return defaultValue
+
+    const normalized = raw.trim().toLowerCase()
+    if (normalized === 'true') return true
+    if (normalized === 'false') return false
+  } catch (e) {
+    console.warn(`クエリパラメータ ${key} の解析に失敗しました:`, e)
+  }
+  return defaultValue
+}
+
+const INVERT_SCROLL = getBooleanQueryParam(INVERT_SCROLL_QUERY_KEY)
+
+function getEmbeddedViewportAspectRatio() {
+  const width = window.innerWidth || document.documentElement?.clientWidth || 0
+  const height = window.innerHeight || document.documentElement?.clientHeight || 0
+  if (!(width > 0 && height > 0)) return EMBEDDED_INITIAL_ZOOM_CORRECTION.standardAspect
+  return width / height
+}
+
+function getEmbeddedInitialZoomFactor() {
+  if (!EMBEDDED_MODE) return 1
+
+  const { standardAspect, standardFactor, narrowAspect, narrowFactor, minFactor, maxFactor } =
+    EMBEDDED_INITIAL_ZOOM_CORRECTION
+  const aspect = getEmbeddedViewportAspectRatio()
+  const narrowness = (standardAspect - aspect) / (standardAspect - narrowAspect)
+  const factor = standardFactor + narrowness * (narrowFactor - standardFactor)
+  return clampNumber(factor, minFactor, maxFactor)
+}
+
+function applyEmbeddedInitialZoomCorrection(zoom) {
+  if (!EMBEDDED_MODE) return zoom
+
+  const scale = Number.isFinite(zoom?.scale) ? zoom.scale : 60
+  const normalizedZoom = zoom.withScale(scale)
+  return normalizedZoom.multiply(fxp.fromNumber(getEmbeddedInitialZoomFactor(), scale))
+}
+
+function getInitialFractalZoom(scale = 60) {
+  return applyEmbeddedInitialZoomCorrection(fxp.fromNumber(1, scale))
+}
 
 function _getOrbitTrapBitmapUrlFromQuery() {
   try {
@@ -621,7 +680,7 @@ class Mandelbrot {
     )
     this.orbitTrapGpu = new OrbitTrapWebGPU((error) => this.gpuErrorCallback(error))
 
-    this.zoom = fxp.fromNumber(1)
+    this.zoom = getInitialFractalZoom()
     this.center = [fxp.fromNumber(-0.5), fxp.fromNumber(0)]
     this.max_iter = DEFAULT_ITERATIONS
     this.smooth = true
@@ -4224,6 +4283,51 @@ function redrawJulia() {
 }
 
 /**
+ * 十進数文字列をズーム入力欄で使う指数表記へ整形する。
+ */
+function formatDecimalToScientific(decimalStr) {
+  decimalStr = (decimalStr || '').trim()
+  if (!decimalStr) return '0.0e0'
+  let sign = ''
+  if (decimalStr[0] === '-') {
+    sign = '-'
+    decimalStr = decimalStr.substring(1)
+  }
+
+  if (/^0+(?:\.0*)?$/.test(decimalStr)) return `${sign}0.0e0`
+
+  let intPart = decimalStr
+  let fracPart = ''
+  const dotIndex = decimalStr.indexOf('.')
+  if (dotIndex !== -1) {
+    intPart = decimalStr.substring(0, dotIndex)
+    fracPart = decimalStr.substring(dotIndex + 1)
+  }
+
+  intPart = intPart.replace(/^0+/, '')
+
+  if (intPart.length > 0) {
+    const all = intPart + fracPart
+    const exp = intPart.length - 1
+    const first = all[0] || '0'
+    const second = all[1] || '0'
+    return `${sign}${first}.${second}e${exp}`
+  }
+
+  const nz = fracPart.match(/[^0]/)
+  if (!nz) return `${sign}0.0e0`
+  const idx = nz.index
+  const exp = -(idx + 1)
+  const first = fracPart[idx] || '0'
+  const second = fracPart[idx + 1] || '0'
+  return `${sign}${first}.${second}e${exp}`
+}
+
+function formatZoomValueForInput(zoom) {
+  return formatDecimalToScientific(fxpToDecimalString(zoom, PRECISION_CONSTANTS.DECIMAL_STRING_PRECISION))
+}
+
+/**
  * 現在のフラクタル状態を座標入力欄へ反映する
  */
 function updateCoordinateInputs() {
@@ -4233,50 +4337,8 @@ function updateCoordinateInputs() {
   const zoomStr = zoomBigInt.toString()
   const zoomExp = zoomStr.length - 1
 
-  // zoom を指数表記へ整形する。zoom < 1 や巨大な値も安定して扱えるよう
-  // fxpToDecimalString を使い、"8.3e-1" のような 2 桁有効数字へ整える。
-  const zoomDecimalStr = fxpToDecimalString(fractal.zoom, PRECISION_CONSTANTS.DECIMAL_STRING_PRECISION)
-  const formatDecimalToScientific = (decimalStr) => {
-    decimalStr = (decimalStr || '').trim()
-    if (!decimalStr) return '0.0e0'
-    let sign = ''
-    if (decimalStr[0] === '-') {
-      sign = '-'
-      decimalStr = decimalStr.substring(1)
-    }
-
-    // zero check
-    if (/^0+(?:\.0*)?$/.test(decimalStr)) return `${sign}0.0e0`
-
-    let intPart = decimalStr
-    let fracPart = ''
-    const dotIndex = decimalStr.indexOf('.')
-    if (dotIndex !== -1) {
-      intPart = decimalStr.substring(0, dotIndex)
-      fracPart = decimalStr.substring(dotIndex + 1)
-    }
-
-    intPart = intPart.replace(/^0+/, '')
-
-    if (intPart.length > 0) {
-      const all = intPart + fracPart
-      const exp = intPart.length - 1
-      const first = all[0] || '0'
-      const second = all[1] || '0'
-      return `${sign}${first}.${second}e${exp}`
-    } else {
-      const nz = fracPart.match(/[^0]/)
-      if (!nz) return `${sign}0.0e0`
-      const idx = nz.index
-      const exp = -(idx + 1)
-      const first = fracPart[idx] || '0'
-      const second = fracPart[idx + 1] || '0'
-      return `${sign}${first}.${second}e${exp}`
-    }
-  }
-
   // 整形済みの zoom 表記を使う
-  const zoomFormatted = formatDecimalToScientific(zoomDecimalStr)
+  const zoomFormatted = formatZoomValueForInput(fractal.zoom)
 
   // zoom の指数と現在の精度から、入力欄へ表示する桁数を決める。
   // 極端なズームでは内部の fractal.precision を優先しつつ、変換が重くなりすぎない
@@ -4435,6 +4497,11 @@ function zoomWithClicks(clicks, cooldown) {
   zoomWithFactor(scaleFactor ** clicks, cooldown)
 }
 
+function getWheelZoomDelta(evt) {
+  const delta = evt.wheelDelta ? evt.wheelDelta / 40 : evt.detail ? -evt.detail : 0
+  return INVERT_SCROLL ? delta : -delta
+}
+
 function scheduleGpuGestureRedraw() {
   gpuGestureRedrawPending = true
   const now = performance.now()
@@ -4551,8 +4618,8 @@ function handleScroll(evt) {
   }
 
   updateMousePos(evt)
-  const delta = evt.wheelDelta ? evt.wheelDelta / 40 : evt.detail ? -evt.detail : 0
-  if (delta) zoomWithClicks(delta, 0) // TODO 描画が重い場合だけ cooldown を入れる
+  const delta = getWheelZoomDelta(evt)
+  if (delta) zoomWithClicks(-delta, 0) // TODO 描画が重い場合だけ cooldown を入れる
   evt.preventDefault()
 }
 
@@ -4562,13 +4629,13 @@ function handleJuliaScroll(evt) {
     evt.preventDefault()
     return
   }
-  const delta = evt.wheelDelta ? evt.wheelDelta / 40 : evt.detail ? -evt.detail : 0
+  const delta = getWheelZoomDelta(evt)
   if (!delta) {
     evt.preventDefault()
     return
   }
 
-  const factor = scaleFactor ** delta
+  const factor = scaleFactor ** -delta
   const renderer = juliaState.renderer
   const p = renderer.precision
   const lowerBound = MIN_ZOOM.withScale(p)
@@ -4815,7 +4882,7 @@ function applyCoordinates() {
     // いったん初期位置へ戻してから目標位置へアニメーションする
     _clearPinnedOrbits()
     fractal.setCenter([fxp.fromNumber(-0.5), fxp.fromNumber(0)])
-    fractal.setZoom(fxp.fromNumber(1))
+    fractal.setZoom(getInitialFractalZoom(fractal.precision))
     // 表示が変わるので保存済み画像を無効化する
     savedFractalImageData = null
     redraw()
@@ -6603,7 +6670,7 @@ function initListeners() {
     }
 
     // フラクタル種別変更時は既定の表示へ戻す
-    fractal.setZoom(fxp.fromNumber(1))
+    fractal.setZoom(getInitialFractalZoom(fractal.precision))
     fractal.restartWorkers()
     _clearPinnedOrbits()
     redraw(true) // フラクタル種別変更時はキャッシュも更新する
@@ -7276,7 +7343,7 @@ function initListeners() {
 
             // まず params を展開して目標の center と zoom を取り出す
             const p = JSON.parse(atob(decodeURIComponent(fav.params)))
-            const targetZoom = fxp.fromJSON(p.zoom)
+            const targetZoom = applyEmbeddedInitialZoomCorrection(fxp.fromJSON(p.zoom))
             const targetCenter = p.center.map((c) => fxp.fromJSON(c))
 
             // favorite へ移動するときは Julia モードを解除する
@@ -7323,7 +7390,7 @@ function initListeners() {
 
             // Move to initial home position immediately, then animate to target
             fractal.setCenter([fxp.fromNumber(-0.5), fxp.fromNumber(0)])
-            fractal.setZoom(fxp.fromNumber(1))
+            fractal.setZoom(getInitialFractalZoom(fractal.precision))
             fractal.initPallete()
             redraw()
 
@@ -7522,7 +7589,7 @@ function reset() {
   }
   buddhaActive = false
 
-  fractal.setZoom(fxp.fromNumber(1))
+  fractal.setZoom(getInitialFractalZoom(fractal.precision))
   // リセット時の既定中心座標
   let resetCenterX = 0
   let resetCenterY = 0
@@ -7796,8 +7863,8 @@ function resetPosition() {
   }
   buddhaActive = false
 
-  // zoom を 1 に戻す
-  fractal.setZoom(fxp.fromNumber(1))
+  // zoom を初期値に戻す
+  fractal.setZoom(getInitialFractalZoom(fractal.precision))
 
   // 現在のフラクタル種別に応じた初期中心座標を求める
   let resetCenterX = 0
@@ -7818,7 +7885,7 @@ function resetPosition() {
   if (coordXEl) coordXEl.value = String(resetCenterX)
   // UI 表示は「上=正の虚数」規則のため符号を反転して表示する
   if (coordYEl) coordYEl.value = String(-resetCenterY)
-  if (coordZoomEl) coordZoomEl.value = '1'
+  if (coordZoomEl) coordZoomEl.value = formatZoomValueForInput(getInitialFractalZoom(fractal.precision))
 
   // 新しい中心座標を反映する
   fractal.setCenter([fxp.fromNumber(resetCenterX), fxp.fromNumber(resetCenterY)])
@@ -8080,7 +8147,7 @@ function init() {
 function initFromParams(params) {
   try {
     const p = JSON.parse(atob(decodeURIComponent(params)))
-    fractal.setZoom(fxp.fromJSON(p.zoom))
+    fractal.setZoom(applyEmbeddedInitialZoomCorrection(fxp.fromJSON(p.zoom)))
     fractal.setCenter(p.center.map(fxp.fromJSON))
     fractal.max_iter = p.max_iter
     fractal.smooth = p.smooth

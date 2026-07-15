@@ -140,7 +140,7 @@ html.embedded-mode #mandelbrot-canvas {
         align-items: center; /* 行を縦中央に寄せる */
         padding-top: 0;
         box-sizing: border-box;
-        padding-bottom: 0.2rem;
+        padding-bottom: 0;
     }
     /* タイトル下の余白で高さが増えないようにする */
     .site-title {
