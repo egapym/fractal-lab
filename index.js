@@ -4457,10 +4457,15 @@ let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
 // 固定中は {clientX, clientY}、未固定なら null。
 let pinnedOrbit = null
 let juliaPinnedOrbit = null
+let orbitTouchTapCandidate = false
+let juliaOrbitTouchTapCandidate = false
+let suppressOrbitClickUntil = 0
+let suppressJuliaOrbitClickUntil = 0
 // ドラッグ検出用。mousedown→mousemove のドラッグが起きたら true にし、
 // ドラッグ直後の click で固定の切り替えが起きないようにする。
 let _orbitPinDragged = false
 let _juliaPinDragged = false
+const TOUCH_CLICK_SUPPRESS_MS = 700
 // let dragged = false
 
 function hasDeferredGpuViewRedraw() {
@@ -5426,6 +5431,97 @@ function _clearPinnedOrbits() {
   clearJuliaOrbitCanvas()
 }
 
+function _getClientCoordinatesFromEvent(evt) {
+  if (evt.touches && evt.touches.length > 0) {
+    return [evt.touches[0].clientX, evt.touches[0].clientY]
+  }
+  if (evt.changedTouches && evt.changedTouches.length > 0) {
+    return [evt.changedTouches[0].clientX, evt.changedTouches[0].clientY]
+  }
+  if (typeof evt.clientX !== 'undefined' && typeof evt.clientY !== 'undefined') {
+    return [evt.clientX, evt.clientY]
+  }
+  return [(evt.pageX || 0) - (window.scrollX || 0), (evt.pageY || 0) - (window.scrollY || 0)]
+}
+
+function _togglePinnedOrbitAtClient(clientX, clientY) {
+  const [px, py] = toGraphicsCoordinates(clientX, clientY)
+  const zoomVal = fractal.zoom.toNumber ? fractal.zoom.toNumber() : 1
+  const fw = fractal.width,
+    fh = fractal.height
+  const scale = (zoomVal * fw) / 4
+  const centerX = fractal.center[0].toNumber ? fractal.center[0].toNumber() : 0
+  const centerY = fractal.center[1].toNumber ? fractal.center[1].toNumber() : 0
+  const re = (px - fw / 2) / scale + centerX
+  const im = (py - fh / 2) / scale + centerY
+  // FxP の複素座標を求める。高精度な軌道描画と固定解除判定に使う。
+  const [reFxp, imFxp] = fractal.canvas2complex ? fractal.canvas2complex(px, py) : [null, null]
+  if (pinnedOrbit) {
+    // 可能なら FxP を使い、オーバーレイ上のピクセル座標で比較する。
+    const orbitCanvas = document.getElementById('orbit-canvas')
+    const ow = orbitCanvas ? orbitCanvas.offsetWidth : fw
+    const oh = orbitCanvas ? orbitCanvas.offsetHeight : fh
+    // クリック位置は物理ピクセルから直接求める
+    const ax = (px / fw) * ow
+    const ay = (py / fh) * oh
+    let bx, by
+    if (pinnedOrbit.reFxp && pinnedOrbit.imFxp) {
+      try {
+        ;[bx, by] = _fxpComplexToOrbitCss(pinnedOrbit.reFxp, pinnedOrbit.imFxp, ow, oh)
+      } catch (_) {
+        bx = (((pinnedOrbit.re - centerX) * scale + fw / 2) / fw) * ow
+        by = (((pinnedOrbit.im - centerY) * scale + fh / 2) / fh) * oh
+      }
+    } else {
+      bx = (((pinnedOrbit.re - centerX) * scale + fw / 2) / fw) * ow
+      by = (((pinnedOrbit.im - centerY) * scale + fh / 2) / fh) * oh
+    }
+    if (Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2) < 8) {
+      pinnedOrbit = null
+      clearOrbitCanvas()
+      return
+    }
+  }
+  pinnedOrbit = { re, im, reFxp, imFxp }
+  try {
+    drawOrbitOnCanvasAtComplex(re, im, px, py, reFxp, imFxp)
+  } catch (_) {}
+}
+
+function _togglePinnedJuliaOrbitAtClient(clientX, clientY) {
+  const renderer = juliaState.renderer
+  if (!juliaState.active || !renderer) return
+  const [px, py] = toGraphicsCoordinatesOnCanvas(renderer.canvas, clientX, clientY)
+  const jZoom = renderer.zoom.toNumber ? renderer.zoom.toNumber() : 1
+  const jW = renderer.canvas.width,
+    jH = renderer.canvas.height
+  const scale = (jZoom * jW) / 4
+  const jCenterX = renderer.center[0].toNumber ? renderer.center[0].toNumber() : 0
+  const jCenterY = renderer.center[1].toNumber ? renderer.center[1].toNumber() : 0
+  const re = (px - jW / 2) / scale + jCenterX
+  const im = (py - jH / 2) / scale + jCenterY
+  if (juliaPinnedOrbit) {
+    const jOrbitCanvas = document.getElementById('julia-orbit-canvas')
+    const ow = jOrbitCanvas ? jOrbitCanvas.offsetWidth : jW
+    const oh = jOrbitCanvas ? jOrbitCanvas.offsetHeight : jH
+    const toPx = (r, i) => [
+      (((r - jCenterX) * scale + jW / 2) / jW) * ow,
+      (((i - jCenterY) * scale + jH / 2) / jH) * oh,
+    ]
+    const [ax, ay] = toPx(re, im)
+    const [bx, by] = toPx(juliaPinnedOrbit.re, juliaPinnedOrbit.im)
+    if (Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2) < 8) {
+      juliaPinnedOrbit = null
+      clearJuliaOrbitCanvas()
+      return
+    }
+  }
+  juliaPinnedOrbit = { re, im }
+  try {
+    drawOrbitOnJuliaCanvasAtComplex(re, im, px, py)
+  } catch (_) {}
+}
+
 function onMouseDown(evt) {
   // Buddhabrot 表示中、またはトグルがオンの間は、表示を固定するため
   // パンやドラッグの開始を許可しない。
@@ -5442,9 +5538,10 @@ function onMouseDown(evt) {
 }
 
 function onMouseMove(evt) {
+  const [clientX, clientY] = _getClientCoordinatesFromEvent(evt)
   // 固定した軌道の十字付近では、解除できることが分かるようポインター表示にする
   if (orbitDrawEnabled && pinnedOrbit) {
-    const [px_c, py_c] = toGraphicsCoordinates(evt.clientX, evt.clientY)
+    const [px_c, py_c] = toGraphicsCoordinates(clientX, clientY)
     const zoomVal = fractal.zoom.toNumber ? fractal.zoom.toNumber() : 1
     const fw = fractal.width,
       fh = fractal.height
@@ -5476,7 +5573,7 @@ function onMouseMove(evt) {
   // 固定済みのときはホバーによる再描画を行わず、その表示を保つ。
   if (orbitDrawEnabled && !pinnedOrbit) {
     try {
-      drawOrbitOnCanvas(evt.clientX, evt.clientY)
+      drawOrbitOnCanvas(clientX, clientY)
     } catch (_e) {}
   }
   // Buddhabrot 表示中、またはトグルがオンの間はパンとドラッグを止める
@@ -5586,18 +5683,7 @@ function onMouseUp(evt) {
 function updateMousePos(evt) {
   // Use client coordinates and bounding rect for robust mapping across
   // scrolling, CSS transforms, and different device pixel ratios.
-  let clientX, clientY
-  if (evt.touches && evt.touches.length > 0) {
-    clientX = evt.touches[0].clientX
-    clientY = evt.touches[0].clientY
-  } else if (typeof evt.clientX !== 'undefined' && typeof evt.clientY !== 'undefined') {
-    clientX = evt.clientX
-    clientY = evt.clientY
-  } else {
-    // 取れない場合は、スクロール量を差し引いた page 座標へ切り替える
-    clientX = (evt.pageX || 0) - (window.scrollX || 0)
-    clientY = (evt.pageY || 0) - (window.scrollY || 0)
-  }
+  const [clientX, clientY] = _getClientCoordinatesFromEvent(evt)
   ;[lastX, lastY] = toGraphicsCoordinates(clientX, clientY)
 }
 
@@ -6237,48 +6323,9 @@ function initListeners() {
     }
   })
   canvasElement.addEventListener('click', (evt) => {
+    if (performance.now() < suppressOrbitClickUntil) return
     if (!orbitDrawEnabled || _orbitPinDragged) return
-    const [px, py] = toGraphicsCoordinates(evt.clientX, evt.clientY)
-    const zoomVal = fractal.zoom.toNumber ? fractal.zoom.toNumber() : 1
-    const fw = fractal.width,
-      fh = fractal.height
-    const scale = (zoomVal * fw) / 4
-    const centerX = fractal.center[0].toNumber ? fractal.center[0].toNumber() : 0
-    const centerY = fractal.center[1].toNumber ? fractal.center[1].toNumber() : 0
-    const re = (px - fw / 2) / scale + centerX
-    const im = (py - fh / 2) / scale + centerY
-    // FxP の複素座標を求める。高精度な軌道描画と固定解除判定に使う。
-    const [reFxp, imFxp] = fractal.canvas2complex ? fractal.canvas2complex(px, py) : [null, null]
-    if (pinnedOrbit) {
-      // 可能なら FxP を使い、オーバーレイ上のピクセル座標で比較する。
-      const orbitCanvas = document.getElementById('orbit-canvas')
-      const ow = orbitCanvas ? orbitCanvas.offsetWidth : fw
-      const oh = orbitCanvas ? orbitCanvas.offsetHeight : fh
-      // クリック位置は物理ピクセルから直接求める
-      const ax = (px / fw) * ow
-      const ay = (py / fh) * oh
-      let bx, by
-      if (pinnedOrbit.reFxp && pinnedOrbit.imFxp) {
-        try {
-          ;[bx, by] = _fxpComplexToOrbitCss(pinnedOrbit.reFxp, pinnedOrbit.imFxp, ow, oh)
-        } catch (_) {
-          bx = (((pinnedOrbit.re - centerX) * scale + fw / 2) / fw) * ow
-          by = (((pinnedOrbit.im - centerY) * scale + fh / 2) / fh) * oh
-        }
-      } else {
-        bx = (((pinnedOrbit.re - centerX) * scale + fw / 2) / fw) * ow
-        by = (((pinnedOrbit.im - centerY) * scale + fh / 2) / fh) * oh
-      }
-      if (Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2) < 8) {
-        pinnedOrbit = null
-        clearOrbitCanvas()
-        return
-      }
-    }
-    pinnedOrbit = { re, im, reFxp, imFxp }
-    try {
-      drawOrbitOnCanvasAtComplex(re, im, px, py, reFxp, imFxp)
-    } catch (_) {}
+    _togglePinnedOrbitAtClient(evt.clientX, evt.clientY)
   })
 
   canvasElement.addEventListener('DOMMouseScroll', handleScroll, {
@@ -6313,40 +6360,9 @@ function initListeners() {
       }
     })
     juliaCanvasElement.addEventListener('click', (evt) => {
+      if (performance.now() < suppressJuliaOrbitClickUntil) return
       if (!orbitDrawEnabled || _juliaPinDragged || !juliaState.active) return
-      const renderer = juliaState.renderer
-      if (!renderer) return
-      const rect = renderer.canvas.getBoundingClientRect()
-      const px = (evt.clientX - rect.left) * (renderer.canvas.width / rect.width)
-      const py = (evt.clientY - rect.top) * (renderer.canvas.height / rect.height)
-      const jZoom = renderer.zoom.toNumber ? renderer.zoom.toNumber() : 1
-      const jW = renderer.canvas.width,
-        jH = renderer.canvas.height
-      const scale = (jZoom * jW) / 4
-      const jCenterX = renderer.center[0].toNumber ? renderer.center[0].toNumber() : 0
-      const jCenterY = renderer.center[1].toNumber ? renderer.center[1].toNumber() : 0
-      const re = (px - jW / 2) / scale + jCenterX
-      const im = (py - jH / 2) / scale + jCenterY
-      if (juliaPinnedOrbit) {
-        const jOrbitCanvas = document.getElementById('julia-orbit-canvas')
-        const ow = jOrbitCanvas ? jOrbitCanvas.offsetWidth : jW
-        const oh = jOrbitCanvas ? jOrbitCanvas.offsetHeight : jH
-        const toPx = (r, i) => [
-          (((r - jCenterX) * scale + jW / 2) / jW) * ow,
-          (((i - jCenterY) * scale + jH / 2) / jH) * oh,
-        ]
-        const [ax, ay] = toPx(re, im)
-        const [bx, by] = toPx(juliaPinnedOrbit.re, juliaPinnedOrbit.im)
-        if (Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2) < 8) {
-          juliaPinnedOrbit = null
-          clearJuliaOrbitCanvas()
-          return
-        }
-      }
-      juliaPinnedOrbit = { re, im }
-      try {
-        drawOrbitOnJuliaCanvasAtComplex(re, im)
-      } catch (_) {}
+      _togglePinnedJuliaOrbitAtClient(evt.clientX, evt.clientY)
     })
     juliaCanvasElement.addEventListener(
       'touchstart',
@@ -6354,12 +6370,14 @@ function initListeners() {
         if (!juliaState.active || !juliaState.renderer) return
         if (evt.cancelable) evt.preventDefault()
         if (evt.touches.length === 1) {
+          juliaOrbitTouchTapCandidate = true
           _juliaPinDragged = false
           juliaDragStart = _juliaCanvasCoordsFromClient(evt.touches[0].clientX, evt.touches[0].clientY)
           juliaLastTouchDistance = null
           juliaLastTouchCenter = null
         }
         if (evt.touches.length === 2) {
+          juliaOrbitTouchTapCandidate = false
           juliaDragStart = null
           juliaLastTouchDistance = Math.hypot(
             evt.touches[0].pageX - evt.touches[1].pageX,
@@ -6407,6 +6425,7 @@ function initListeners() {
         }
 
         if (evt.touches.length === 2) {
+          juliaOrbitTouchTapCandidate = false
           const newTouchDistance = Math.hypot(
             evt.touches[0].pageX - evt.touches[1].pageX,
             evt.touches[0].pageY - evt.touches[1].pageY,
@@ -6452,10 +6471,22 @@ function initListeners() {
       },
       { passive: false },
     )
-    juliaCanvasElement.addEventListener('touchend', (_evt) => {
+    juliaCanvasElement.addEventListener('touchend', (evt) => {
+      const touch = juliaOrbitTouchTapCandidate && evt.changedTouches?.length === 1 ? evt.changedTouches[0] : null
       onJuliaMouseUp()
       juliaLastTouchDistance = null
       juliaLastTouchCenter = null
+      juliaOrbitTouchTapCandidate = false
+      if (orbitDrawEnabled && touch && !_juliaPinDragged && juliaState.active) {
+        suppressJuliaOrbitClickUntil = performance.now() + TOUCH_CLICK_SUPPRESS_MS
+        _togglePinnedJuliaOrbitAtClient(touch.clientX, touch.clientY)
+      }
+    })
+    juliaCanvasElement.addEventListener('touchcancel', () => {
+      onJuliaMouseUp()
+      juliaLastTouchDistance = null
+      juliaLastTouchCenter = null
+      juliaOrbitTouchTapCandidate = false
     })
   }
 
@@ -6464,9 +6495,11 @@ function initListeners() {
     (evt) => {
       if (evt.cancelable && evt.touches.length >= 1) evt.preventDefault()
       if (evt.touches.length === 1) {
+        orbitTouchTapCandidate = true
         onMouseDown(evt)
       }
       if (evt.touches.length === 2) {
+        orbitTouchTapCandidate = false
         lastTouchDistance = Math.hypot(
           evt.touches[0].pageX - evt.touches[1].pageX,
           evt.touches[0].pageY - evt.touches[1].pageY,
@@ -6490,6 +6523,7 @@ function initListeners() {
         }
       }
       if (evt.touches.length === 2) {
+        orbitTouchTapCandidate = false
         if (evt.cancelable && document.fullscreenElement == null) evt.preventDefault()
         // Buddhabrot 表示中、またはトグルがオンならピンチ操作を無視する
         const t = document.getElementById('buddha-toggle')
@@ -6533,16 +6567,23 @@ function initListeners() {
     { passive: false },
   )
   canvasElement.addEventListener('touchend', (evt) => {
+    const touch = orbitTouchTapCandidate && evt.changedTouches?.length === 1 ? evt.changedTouches[0] : null
     onMouseUp(evt)
     lastTouchDistance = null
     lastTouchCenter = null
     flushGpuGestureRedraw()
+    orbitTouchTapCandidate = false
+    if (orbitDrawEnabled && touch && !_orbitPinDragged) {
+      suppressOrbitClickUntil = performance.now() + TOUCH_CLICK_SUPPRESS_MS
+      _togglePinnedOrbitAtClient(touch.clientX, touch.clientY)
+    }
     // evt.preventDefault()
   })
   canvasElement.addEventListener('touchcancel', () => {
     dragStart = null
     lastTouchDistance = null
     lastTouchCenter = null
+    orbitTouchTapCandidate = false
     flushGpuGestureRedraw()
   })
 
