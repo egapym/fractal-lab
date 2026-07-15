@@ -1364,13 +1364,6 @@ class Mandelbrot {
     // GPU 更新成功時も、ワーカー由来のエラー表示が残っているなら消さない
     if (!iterationFunctionHasError) setIterationFunctionLabelError(false)
 
-    if (hasDeferredGpuViewRedraw()) {
-      if (answer.isFinished) {
-        this.progress.finish()
-      }
-      return
-    }
-
     const screen = this.offscreens[this.offscreens.length - 1]
     if (answer.rgba) {
       if (answer.isFinished) {
@@ -1387,6 +1380,7 @@ class Mandelbrot {
         this.permalinkUpdated = true
         updatePermalink()
       }
+      reapplyPendingInteractiveTransform()
       return
     }
 
@@ -1416,6 +1410,7 @@ class Mandelbrot {
     }
 
     screen.render(this.palette, this.max_iter, this.smooth, this.paletteComponent.palette)
+    reapplyPendingInteractiveTransform()
 
     if (
       !this.permalinkUpdated &&
@@ -4460,6 +4455,12 @@ let juliaLastTouchCenter = null
 let gpuInteractiveRedrawTimer = null
 let gpuInteractiveRedrawPending = false
 let lastGpuInteractiveRedrawAt = 0
+let pendingInteractivePanDx = 0
+let pendingInteractivePanDy = 0
+let pendingInteractivePinchView = null
+let pendingInteractiveTransformScale = 1
+let pendingInteractiveTransformTx = 0
+let pendingInteractiveTransformTy = 0
 let orbitDrawEnabled = false // 軌道表示が有効か
 let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
 // 軌道の固定表示。キャンバスをクリックすると、その点に軌道を固定する。
@@ -4475,11 +4476,8 @@ let suppressJuliaOrbitClickUntil = 0
 let _orbitPinDragged = false
 let _juliaPinDragged = false
 const TOUCH_CLICK_SUPPRESS_MS = 700
+const GPU_INTERACTIVE_REDRAW_INTERVAL_MS = 50
 // let dragged = false
-
-function hasDeferredGpuViewRedraw() {
-  return gpuInteractiveRedrawPending
-}
 
 function isMainRenderGpuPath() {
   return (
@@ -4516,19 +4514,123 @@ function getWheelZoomDelta(evt) {
   return INVERT_SCROLL ? delta : -delta
 }
 
+function hasPendingInteractivePan() {
+  return pendingInteractivePanDx !== 0 || pendingInteractivePanDy !== 0
+}
+
+function hasPendingInteractiveTransform() {
+  return (
+    pendingInteractiveTransformScale !== 1 || pendingInteractiveTransformTx !== 0 || pendingInteractiveTransformTy !== 0
+  )
+}
+
+function accumulateInteractivePan(dx, dy) {
+  pendingInteractivePanDx += dx
+  pendingInteractivePanDy += dy
+}
+
+function trackPendingInteractivePanTransform(dx, dy) {
+  pendingInteractiveTransformTx += dx
+  pendingInteractiveTransformTy += dy
+}
+
+function trackPendingInteractiveScaleTransform(factor, x, y) {
+  pendingInteractiveTransformTx = factor * pendingInteractiveTransformTx + (1 - factor) * x
+  pendingInteractiveTransformTy = factor * pendingInteractiveTransformTy + (1 - factor) * y
+  pendingInteractiveTransformScale *= factor
+}
+
+function resetPendingInteractiveTransform() {
+  pendingInteractiveTransformScale = 1
+  pendingInteractiveTransformTx = 0
+  pendingInteractiveTransformTy = 0
+}
+
+function reapplyPendingInteractiveTransform() {
+  if (!hasPendingInteractiveTransform()) return
+  if (tempCanvas.width !== canvasElement.width) tempCanvas.width = canvasElement.width
+  if (tempCanvas.height !== canvasElement.height) tempCanvas.height = canvasElement.height
+
+  const tempCtx = tempCanvas.getContext('2d')
+  tempCtx.setTransform(1, 0, 0, 1, 0, 0)
+  tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height)
+  tempCtx.drawImage(canvasElement, 0, 0)
+
+  const ctx = canvasElement.getContext('2d')
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.clearRect(0, 0, canvasElement.width, canvasElement.height)
+  ctx.setTransform(
+    pendingInteractiveTransformScale,
+    0,
+    0,
+    pendingInteractiveTransformScale,
+    pendingInteractiveTransformTx,
+    pendingInteractiveTransformTy,
+  )
+  ctx.drawImage(tempCanvas, 0, 0)
+  ctx.restore()
+}
+
+function hasPendingInteractiveView() {
+  return pendingInteractivePinchView != null || hasPendingInteractivePan()
+}
+
+function ensurePendingInteractivePinchView() {
+  if (!pendingInteractivePinchView) {
+    const p = fractal.precision
+    let center = [fractal.center[0].withScale(p), fractal.center[1].withScale(p)]
+    const zoom = fractal.zoom.withScale(p)
+    if (hasPendingInteractivePan()) {
+      center = _centerAfterPixelDelta(center, zoom, pendingInteractivePanDx, pendingInteractivePanDy, p)
+      pendingInteractivePanDx = 0
+      pendingInteractivePanDy = 0
+    }
+    pendingInteractivePinchView = {
+      center,
+      zoom,
+    }
+  }
+  return pendingInteractivePinchView
+}
+
+function commitPendingInteractivePan() {
+  if (!hasPendingInteractivePan()) return false
+  const dx = pendingInteractivePanDx
+  const dy = pendingInteractivePanDy
+  pendingInteractivePanDx = 0
+  pendingInteractivePanDy = 0
+  applyPixelDeltaToCenter(dx, dy)
+  return true
+}
+
+function startGpuInteractiveRedrawNow() {
+  if (pendingInteractivePinchView) {
+    fractal.setZoom(pendingInteractivePinchView.zoom)
+    fractal.setCenter(pendingInteractivePinchView.center)
+    pendingInteractivePinchView = null
+    pendingInteractivePanDx = 0
+    pendingInteractivePanDy = 0
+  } else {
+    commitPendingInteractivePan()
+  }
+  resetPendingInteractiveTransform()
+  lastGpuInteractiveRedrawAt = performance.now()
+  fractal.interactiveGpuRedraw = true
+  cancelActiveMainRender()
+  redraw(false, 0)
+}
+
 function scheduleGpuInteractiveRedraw() {
   gpuInteractiveRedrawPending = true
   const now = performance.now()
-  const MIN_GPU_INTERACTIVE_REDRAW_INTERVAL = 120
-  const wait = Math.max(0, MIN_GPU_INTERACTIVE_REDRAW_INTERVAL - (now - lastGpuInteractiveRedrawAt))
+  const wait = Math.max(0, GPU_INTERACTIVE_REDRAW_INTERVAL_MS - (now - lastGpuInteractiveRedrawAt))
   if (gpuInteractiveRedrawTimer != null) return
   gpuInteractiveRedrawTimer = setTimeout(() => {
     gpuInteractiveRedrawTimer = null
     if (!gpuInteractiveRedrawPending) return
     gpuInteractiveRedrawPending = false
-    lastGpuInteractiveRedrawAt = performance.now()
-    fractal.interactiveGpuRedraw = true
-    redraw(false, 0)
+    startGpuInteractiveRedrawNow()
   }, wait)
 }
 
@@ -4537,11 +4639,15 @@ function flushGpuInteractiveRedraw() {
     clearTimeout(gpuInteractiveRedrawTimer)
     gpuInteractiveRedrawTimer = null
   }
-  if (!gpuInteractiveRedrawPending) return
+  if (!gpuInteractiveRedrawPending && !hasPendingInteractiveView() && !hasPendingInteractiveTransform()) return
   gpuInteractiveRedrawPending = false
-  lastGpuInteractiveRedrawAt = performance.now()
-  fractal.interactiveGpuRedraw = true
-  redraw(false, 0)
+  startGpuInteractiveRedrawNow()
+}
+
+function maybeStartTouchDragGpuRedraw() {
+  if (performance.now() - lastGpuInteractiveRedrawAt < GPU_INTERACTIVE_REDRAW_INTERVAL_MS) return false
+  startGpuInteractiveRedrawNow()
+  return true
 }
 
 function zoomWithFactor(factor, cooldown, options = {}) {
@@ -4573,32 +4679,11 @@ function zoomWithFactor(factor, cooldown, options = {}) {
   const lowerBound = MIN_ZOOM.withScale(fractal.precision)
   if (fractal.zoom.leq(lowerBound) && factor < 1) return
 
-  // ズーム前の、マウス下にある複素平面上の点を求める
-  const ptr = fractal.canvas2complex(lastX, lastY)
-
-  // 新しいズーム値を求める
-  const bigFactor = fxp.fromNumber(factor, fractal.precision)
-  const newZoom = fractal.zoom.multiply(bigFactor).max(lowerBound)
-
-  // ズーム後の中心からのずれ量を求める
-  // 中心からのオフセットはズーム倍率に応じて変わる
-  const offsetX = ptr[0].subtract(fractal.center[0])
-  const offsetY = ptr[1].subtract(fractal.center[1])
-
-  // マウス下の点を保つには、ズーム後のオフセットを (1 / factor) 倍にする。
-  // 求めたい条件は次の通り:
-  // new_center + new_offset = ptr
-  // new_offset = offset / factor
-  // new_center = ptr - offset / factor = ptr - offset / factor
-  const invFactor = fxp.fromNumber(1.0 / factor, fractal.precision)
-  const newOffsetX = offsetX.multiply(invFactor)
-  const newOffsetY = offsetY.multiply(invFactor)
-
-  const newCenter = [ptr[0].subtract(newOffsetX), ptr[1].subtract(newOffsetY)]
+  const zoomedView = _zoomViewAroundCanvasPoint(fractal.center, fractal.zoom, factor, lastX, lastY, fractal.precision)
 
   // 新しい中心座標とズームを反映する
-  fractal.setCenter(newCenter)
-  fractal.setZoom(newZoom)
+  fractal.setCenter(zoomedView.center)
+  fractal.setZoom(zoomedView.zoom)
   if (detailPinnedState) {
     clearPinnedDetailPopup()
   } else if (detailHoverState) {
@@ -5653,20 +5738,32 @@ function onMouseMove(evt) {
     // 非常に小さい差分も残せるよう BigInt 経路で反映する
 
     const deferDragRedraw = isMainRenderGpuPath()
-    if (deferDragRedraw) {
-      cancelActiveMainRender()
-    }
+    const isTouchDrag = evt.type === 'touchmove'
 
-    applyPixelDeltaToCenter(dx, dy)
-
-    panCanvas(dx, dy)
-    dragStart = [lastX, lastY]
-    _orbitPinDragged = true
-    if (deferDragRedraw) {
-      scheduleGpuInteractiveRedraw()
+    if (deferDragRedraw && isTouchDrag) {
+      accumulateInteractivePan(dx, dy)
+      trackPendingInteractivePanTransform(dx, dy)
+      panCanvas(dx, dy)
+      dragStart = [lastX, lastY]
+      _orbitPinDragged = true
+      maybeStartTouchDragGpuRedraw()
       if (juliaState.active) redrawJulia()
     } else {
-      redraw()
+      if (deferDragRedraw) {
+        cancelActiveMainRender()
+      }
+
+      applyPixelDeltaToCenter(dx, dy)
+
+      panCanvas(dx, dy)
+      dragStart = [lastX, lastY]
+      _orbitPinDragged = true
+      if (deferDragRedraw) {
+        scheduleGpuInteractiveRedraw()
+        if (juliaState.active) redrawJulia()
+      } else {
+        redraw()
+      }
     }
     _refreshPinnedOrbits()
   }
@@ -5968,18 +6065,40 @@ function initDetailsFeature() {
 // ピクセル差分（整数）を高精度 FxP の複素平面差分へ変換する旧説明。
 // 現在は pixelDeltaToFxP を廃止し、applyPixelDeltaToCenter を使う。
 
-// BigInt 演算でピクセル差分を fractal.center へ直接反映する。
-// 中心座標の整数表現の変化量を計算することで、ズームに対して非常に小さい
-// 差分も失われにくくする。
-function applyPixelDeltaToCenter(dx, dy) {
+function _canvas2complexForView(x, y, center, zoom, precision = fractal.precision) {
+  x = Math.round(x)
+  y = Math.round(y)
+  const w = fxp.fromNumber(fractal.width, precision)
+  const h = fxp.fromNumber(fractal.height, precision)
+  const zoomFx = zoom.withScale(precision)
+  const scale = zoomFx.multiply(w).divide(fxp.fromNumber(4, precision))
+  const centerRe = center[0].withScale(precision)
+  const centerIm = center[1].withScale(precision)
+  try {
+    if (scale.bigIntValue() <= 0n) {
+      return [centerRe, centerIm]
+    }
+  } catch (_e) {}
+  const r = fxp
+    .fromNumber(x, precision)
+    .subtract(w.divide(fxp.fromNumber(2, precision)))
+    .divide(scale)
+  const i = fxp
+    .fromNumber(y, precision)
+    .subtract(h.divide(fxp.fromNumber(2, precision)))
+    .divide(scale)
+  return [r.add(centerRe), i.add(centerIm)]
+}
+
+function _centerAfterPixelDelta(center, zoom, dx, dy, precision = fractal.precision) {
   // サブピクセル移動はまれで影響も小さいため、まず整数ピクセルへ丸める。
   // 必要なら将来は有理数演算へ拡張できる。
   const dxInt = BigInt(Math.round(dx))
   const dyInt = BigInt(Math.round(dy))
 
   // scale_fx は canvas2complex と同じ定義
-  const w_fx = fxp.fromNumber(fractal.width, fractal.precision)
-  const scale_fx = fractal.zoom.multiply(w_fx).divide(fxp.fromNumber(4, fractal.precision))
+  const w_fx = fxp.fromNumber(fractal.width, precision)
+  const scale_fx = zoom.withScale(precision).multiply(w_fx).divide(fxp.fromNumber(4, precision))
 
   const denom = scale_fx.bigInt // integer representing scale_fx * 2^precision
   // 1 ピクセル差分を表現できる中心座標スケールを決める。
@@ -5987,10 +6106,10 @@ function applyPixelDeltaToCenter(dx, dy) {
   // denom のビット長から必要な S' を見積もる。
   const denomBitLen = scale_fx.bigInt === 0n ? 1 : scale_fx.bigInt.toString(2).length
   const marginBits = 4 // small safety margin
-  const minS = Math.max(fractal.center[0].scale, Math.max(0, denomBitLen - fractal.precision - marginBits))
+  const minS = Math.max(center[0].scale, Math.max(0, denomBitLen - precision - marginBits))
 
   const S = minS // 差分計算に使う中心座標のスケール
-  const P = fractal.precision
+  const P = precision
   const shift = BigInt(S + P)
 
   function computeDeltaBig(pxInt) {
@@ -6008,8 +6127,8 @@ function applyPixelDeltaToCenter(dx, dy) {
 
   // キャンバスを右へ動かすと実部は減るため、中心の BigInt 値は減算で更新する
   // scale を S へ広げた場合は、現在の中心座標も先に S へそろえてから差し引く
-  let curRe = fractal.center[0]
-  let curIm = fractal.center[1]
+  let curRe = center[0]
+  let curIm = center[1]
   if (curRe.scale !== S) {
     curRe = curRe.withScale(S)
     curIm = curIm.withScale(S)
@@ -6018,10 +6137,41 @@ function applyPixelDeltaToCenter(dx, dy) {
   const newCenterRe = curRe.bigInt - deltaBigRe
   const newCenterIm = curIm.bigInt - deltaBigIm
 
-  const newReFxP = new fxp.FxP(newCenterRe, S, BigInt(S))
-  const newImFxP = new fxp.FxP(newCenterIm, S, BigInt(S))
+  return [new fxp.FxP(newCenterRe, S, BigInt(S)), new fxp.FxP(newCenterIm, S, BigInt(S))]
+}
 
-  fractal.setCenter([newReFxP, newImFxP])
+function _zoomViewAroundCanvasPoint(center, zoom, factor, x, y, precision = fractal.precision) {
+  const lowerBound = MIN_ZOOM.withScale(precision)
+  const zoomFx = zoom.withScale(precision)
+  if (zoomFx.leq(lowerBound) && factor < 1) {
+    return {
+      center: [center[0].withScale(precision), center[1].withScale(precision)],
+      zoom: zoomFx,
+    }
+  }
+
+  const ptr = _canvas2complexForView(x, y, center, zoomFx, precision)
+  const bigFactor = fxp.fromNumber(factor, precision)
+  const newZoom = zoomFx.multiply(bigFactor).max(lowerBound)
+  const centerRe = center[0].withScale(precision)
+  const centerIm = center[1].withScale(precision)
+  const offsetX = ptr[0].subtract(centerRe)
+  const offsetY = ptr[1].subtract(centerIm)
+  const invFactor = fxp.fromNumber(1.0 / factor, precision)
+  const newOffsetX = offsetX.multiply(invFactor)
+  const newOffsetY = offsetY.multiply(invFactor)
+
+  return {
+    center: [ptr[0].subtract(newOffsetX), ptr[1].subtract(newOffsetY)],
+    zoom: newZoom,
+  }
+}
+
+// BigInt 演算でピクセル差分を fractal.center へ直接反映する。
+// 中心座標の整数表現の変化量を計算することで、ズームに対して非常に小さい
+// 差分も失われにくくする。
+function applyPixelDeltaToCenter(dx, dy) {
+  fractal.setCenter(_centerAfterPixelDelta(fractal.center, fractal.zoom, dx, dy, fractal.precision))
 }
 
 let devicePixelBoxSize = null
@@ -6704,10 +6854,34 @@ function initListeners() {
         const dx = lastX - newX
         const dy = lastY - newY
 
-        applyPixelDeltaToCenter(dx, dy)
-        panCanvas(dx, dy)
-
-        zoomWithFactor(factor, 0, { gesture: true })
+        const deferPinchRedraw = isMainRenderGpuPath()
+        if (deferPinchRedraw) {
+          if (detailPinnedState) clearPinnedDetailPopup()
+          const pendingView = ensurePendingInteractivePinchView()
+          pendingView.center = _centerAfterPixelDelta(pendingView.center, pendingView.zoom, dx, dy, fractal.precision)
+          const zoomedPendingView = _zoomViewAroundCanvasPoint(
+            pendingView.center,
+            pendingView.zoom,
+            factor,
+            lastX,
+            lastY,
+            fractal.precision,
+          )
+          pendingInteractivePinchView = {
+            center: zoomedPendingView.center,
+            zoom: zoomedPendingView.zoom,
+          }
+          trackPendingInteractivePanTransform(dx, dy)
+          panCanvas(dx, dy)
+          trackPendingInteractiveScaleTransform(factor, lastX, lastY)
+          scaleCanvas(factor, lastX, lastY)
+          scheduleGpuInteractiveRedraw()
+          _refreshPinnedOrbits()
+        } else {
+          applyPixelDeltaToCenter(dx, dy)
+          panCanvas(dx, dy)
+          zoomWithFactor(factor, 0, { gesture: true })
+        }
         lastTouchDistance = newTouchDistance
         lastTouchCenter = newTouchCenter
       }
