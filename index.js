@@ -8263,6 +8263,67 @@ function resetPosition() {
   _refreshPinnedOrbits()
 }
 
+const PERMALINK_UPDATE_MIN_INTERVAL_MS = 250
+const PERMALINK_SECURITY_ERROR_BACKOFF_MS = 10000
+let pendingPermalinkHref = null
+let pendingPermalinkTimer = null
+let lastPermalinkHref = ''
+let lastPermalinkUpdateAt = 0
+let permalinkBackoffUntil = 0
+
+function _schedulePendingPermalinkUpdate(delay) {
+  if (pendingPermalinkTimer != null) {
+    clearTimeout(pendingPermalinkTimer)
+  }
+  pendingPermalinkTimer = setTimeout(() => {
+    pendingPermalinkTimer = null
+    _flushPendingPermalinkUpdate()
+  }, Math.max(0, delay))
+}
+
+function _flushPendingPermalinkUpdate() {
+  if (!pendingPermalinkHref) return
+
+  const now = performance.now()
+  if (now < permalinkBackoffUntil) {
+    _schedulePendingPermalinkUpdate(permalinkBackoffUntil - now)
+    return
+  }
+
+  const href = pendingPermalinkHref
+  if (href === lastPermalinkHref) {
+    pendingPermalinkHref = null
+    return
+  }
+
+  const wait = PERMALINK_UPDATE_MIN_INTERVAL_MS - (now - lastPermalinkUpdateAt)
+  if (wait > 0) {
+    _schedulePendingPermalinkUpdate(wait)
+    return
+  }
+
+  try {
+    window.history.replaceState({}, '', href)
+    lastPermalinkHref = href
+    lastPermalinkUpdateAt = performance.now()
+    if (pendingPermalinkHref === href) {
+      pendingPermalinkHref = null
+    }
+  } catch (error) {
+    const message = error?.message ? error.message : String(error)
+    if (error?.name === 'SecurityError') {
+      permalinkBackoffUntil = performance.now() + PERMALINK_SECURITY_ERROR_BACKOFF_MS
+    }
+    console.warn('Error updating permalink:', message)
+    _schedulePendingPermalinkUpdate(
+      Math.max(
+        PERMALINK_UPDATE_MIN_INTERVAL_MS,
+        permalinkBackoffUntil > 0 ? permalinkBackoffUntil - performance.now() : 0,
+      ),
+    )
+  }
+}
+
 function updatePermalink() {
   const url = new URL(window.location)
   const p = url.searchParams
@@ -8301,8 +8362,8 @@ function updatePermalink() {
   }
 
   p.set('params', btoa(JSON.stringify(params)))
-
-  window.history.replaceState({}, '', url)
+  pendingPermalinkHref = url.toString()
+  _flushPendingPermalinkUpdate()
 }
 
 function initUI() {
