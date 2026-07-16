@@ -4505,12 +4505,20 @@ function cancelActiveMainRender() {
 
 const scaleFactor = 1.02 // ズームを滑らかにするため 1 スクロールあたり約 2% に抑える
 
-function zoomWithClicks(clicks, cooldown) {
-  zoomWithFactor(scaleFactor ** clicks, cooldown)
+function zoomWithClicks(clicks, cooldown, options = {}) {
+  zoomWithFactor(scaleFactor ** clicks, cooldown, options)
 }
 
 function getWheelZoomDelta(evt) {
-  const delta = evt.wheelDelta ? evt.wheelDelta / 40 : evt.detail ? -evt.detail : 0
+  let delta = 0
+  if (typeof evt.deltaY === 'number' && evt.deltaY !== 0) {
+    let pixelDelta = evt.deltaY
+    if (evt.deltaMode === 1) pixelDelta *= 16
+    else if (evt.deltaMode === 2) pixelDelta *= window.innerHeight || 800
+    delta = -pixelDelta / 40
+  } else {
+    delta = evt.wheelDelta ? evt.wheelDelta / 40 : evt.detail ? -evt.detail : 0
+  }
   return INVERT_SCROLL ? delta : -delta
 }
 
@@ -4679,26 +4687,37 @@ function zoomWithFactor(factor, cooldown, options = {}) {
   const lowerBound = MIN_ZOOM.withScale(fractal.precision)
   if (fractal.zoom.leq(lowerBound) && factor < 1) return
 
-  const zoomedView = _zoomViewAroundCanvasPoint(fractal.center, fractal.zoom, factor, lastX, lastY, fractal.precision)
-
-  // 新しい中心座標とズームを反映する
-  fractal.setCenter(zoomedView.center)
-  fractal.setZoom(zoomedView.zoom)
-  if (detailPinnedState) {
-    clearPinnedDetailPopup()
-  } else if (detailHoverState) {
-    _renderDetailIndicator()
-  }
-
   const deferGestureRedraw = options.gesture && isMainRenderGpuPath()
   if (deferGestureRedraw) {
-    cancelActiveMainRender()
-  }
-
-  scaleCanvas(factor, lastX, lastY)
-  if (deferGestureRedraw) {
+    if (detailPinnedState) clearPinnedDetailPopup()
+    const pendingView = ensurePendingInteractivePinchView()
+    const zoomedPendingView = _zoomViewAroundCanvasPoint(
+      pendingView.center,
+      pendingView.zoom,
+      factor,
+      lastX,
+      lastY,
+      fractal.precision,
+    )
+    pendingInteractivePinchView = {
+      center: zoomedPendingView.center,
+      zoom: zoomedPendingView.zoom,
+    }
+    trackPendingInteractiveScaleTransform(factor, lastX, lastY)
+    scaleCanvas(factor, lastX, lastY)
     scheduleGpuInteractiveRedraw()
   } else {
+    const zoomedView = _zoomViewAroundCanvasPoint(fractal.center, fractal.zoom, factor, lastX, lastY, fractal.precision)
+
+    // 新しい中心座標とズームを反映する
+    fractal.setCenter(zoomedView.center)
+    fractal.setZoom(zoomedView.zoom)
+    if (detailPinnedState) {
+      clearPinnedDetailPopup()
+    } else if (detailHoverState) {
+      _renderDetailIndicator()
+    }
+    scaleCanvas(factor, lastX, lastY)
     redraw(false, cooldown)
   }
   _refreshPinnedOrbits()
@@ -4725,7 +4744,7 @@ function handleScroll(evt) {
 
   updateMousePos(evt)
   const delta = getWheelZoomDelta(evt)
-  if (delta) zoomWithClicks(-delta, 0) // TODO 描画が重い場合だけ cooldown を入れる
+  if (delta) zoomWithClicks(-delta, 0, { gesture: evt.type === 'wheel' })
   evt.preventDefault()
 }
 
@@ -6611,19 +6630,13 @@ function initListeners() {
     _togglePinnedOrbitAtClient(evt.clientX, evt.clientY)
   })
 
-  canvasElement.addEventListener('DOMMouseScroll', handleScroll, {
-    passive: false,
-  })
-  canvasElement.addEventListener('mousewheel', handleScroll, {
+  canvasElement.addEventListener('wheel', handleScroll, {
     passive: false,
   })
 
   // Julia キャンバス用の独立スクロールズーム
   if (juliaCanvasElement) {
-    juliaCanvasElement.addEventListener('DOMMouseScroll', handleJuliaScroll, {
-      passive: false,
-    })
-    juliaCanvasElement.addEventListener('mousewheel', handleJuliaScroll, {
+    juliaCanvasElement.addEventListener('wheel', handleJuliaScroll, {
       passive: false,
     })
     juliaCanvasElement.addEventListener('mousedown', onJuliaMouseDown)
