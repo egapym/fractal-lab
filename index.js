@@ -319,6 +319,11 @@ const ANIMATION_CONSTANTS = {
   DEFAULT_ANIMATION_SPEED: 0.15,
 }
 
+const PROGRESS_INDICATOR_CONSTANTS = {
+  MIN_HIDDEN_INTERVAL_MS: 300,
+  UPDATE_INTERVAL_MS: 100,
+}
+
 // 精度と計算まわりの定数
 const PRECISION_CONSTANTS = {
   MIN_GPU_PRECISION: 64,
@@ -1852,6 +1857,10 @@ class ProgressMonitor {
     this.lastUpdate = 0
     this.startTime = 0
     this.completed = false
+    this.visible = false
+    this.lastHiddenAt = Number.NEGATIVE_INFINITY
+    this.showTimer = null
+    this.canvas.style.display = 'none'
   }
 
   start(tasks) {
@@ -1860,8 +1869,9 @@ class ProgressMonitor {
     this.completed = false
     this.lastUpdate = performance.now()
     this.startTime = this.lastUpdate
+    this._cancelPendingShow()
     this._draw(0)
-    this.canvas.style.display = 'block'
+    this._showWithCooldown()
     // 描画中は render time を隠す
     if (this.timeElementId) {
       const el = document.getElementById(this.timeElementId)
@@ -1872,7 +1882,7 @@ class ProgressMonitor {
   update(amount = 1) {
     this.done = Math.min(this.done + amount, this.tasks)
     const now = performance.now()
-    if (now - this.lastUpdate > 100) {
+    if (now - this.lastUpdate > PROGRESS_INDICATOR_CONSTANTS.UPDATE_INTERVAL_MS) {
       const percent = (this.done / this.tasks) * 100
       // console.log(`Rendering ${percent.toFixed(0)}%`)
       this.lastUpdate = now
@@ -1886,6 +1896,7 @@ class ProgressMonitor {
 
   finish() {
     this.done = this.tasks
+    this._cancelPendingShow()
     if (!this.completed) {
       this.completed = true
       this._draw(100)
@@ -1899,7 +1910,7 @@ class ProgressMonitor {
         renderTimeElement.style.visibility = 'visible'
       }
     }
-    this.canvas.style.display = 'none'
+    this._hide()
   }
 
   _draw(percentage) {
@@ -1920,6 +1931,46 @@ class ProgressMonitor {
     ctx.arc(centerX, centerY, radius, 0, (1 - percentage / 100) * 2 * Math.PI)
     ctx.lineTo(centerX, centerY)
     ctx.fill()
+  }
+
+  _showWithCooldown() {
+    if (this.visible) {
+      this._show()
+      return
+    }
+
+    const elapsedSinceHide = performance.now() - this.lastHiddenAt
+    if (elapsedSinceHide >= PROGRESS_INDICATOR_CONSTANTS.MIN_HIDDEN_INTERVAL_MS) {
+      this._show()
+      return
+    }
+
+    const wait = PROGRESS_INDICATOR_CONSTANTS.MIN_HIDDEN_INTERVAL_MS - elapsedSinceHide
+    this.showTimer = window.setTimeout(() => {
+      this.showTimer = null
+      if (this.completed || this.done >= this.tasks) return
+      this._show()
+    }, wait)
+  }
+
+  _show() {
+    const percent = this.tasks > 0 ? (this.done / this.tasks) * 100 : 0
+    this._draw(percent)
+    this.canvas.style.display = 'block'
+    this.visible = true
+  }
+
+  _hide() {
+    this.canvas.style.display = 'none'
+    this.visible = false
+    this.lastHiddenAt = performance.now()
+  }
+
+  _cancelPendingShow() {
+    if (this.showTimer != null) {
+      window.clearTimeout(this.showTimer)
+      this.showTimer = null
+    }
   }
 }
 
