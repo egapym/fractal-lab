@@ -3672,8 +3672,6 @@ async function startBuddhaRender() {
     }
   }
 
-  // 以前のデバッグ用フック跡。現在は使用しない
-
   if (abortIfBuddhaRenderCanceled()) return
   const runnerToStart = buddhaRunner
   if (!runnerToStart || typeof runnerToStart.start !== 'function') {
