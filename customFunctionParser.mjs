@@ -467,16 +467,6 @@ function parseExpression(expr) {
   // power 処理は convertGenericExpression 側で行う
   code = code.replace(/\bc\b/g, '[cReal, cImag]')
 
-  // 虚数単位 i の処理
-  // i* や *i は [0, 1] の乗算として扱う
-  // 特別扱い: i * Im(x) は複素配列同士の積ではなく [0, Im(x)] にする
-  code = code.replace(/i\s*\*\s*Im\(([^)]+)\)/g, '[0, $1[1]]')
-  // i * |Im(x)| も [0, Math.abs(x[1])] に変換
-  code = code.replace(/i\s*\*\s*\|Im\(([^)]+)\)\|/g, '[0, Math.abs($1[1])]')
-  // フォールバック: i を一般的な複素数乗算として扱う
-  code = code.replace(/i\s*\*/g, '[0, 1]*')
-  code = code.replace(/\*\s*i(?![a-zA-Z])/g, '*[0, 1]')
-
   // Re/Im の絶対値を先に処理する（後で Re/Im 単独を処理するため）
   code = code.replace(/\|Re\(([^)]+)\)\|/g, '[Math.abs($1[0]), 0]')
   code = code.replace(/\|Im\(([^)]+)\)\|/g, '[Math.abs($1[1]), 0]')
@@ -531,9 +521,11 @@ function parseExpression(expr) {
   // ネーム付き関数の置換を安定するまで繰り返して、
   // ネストした関数呼び出しも完全に変換する。
   // 無限ループを避けるため繰り返し回数に上限を設ける。
+  // Re/Im は実数スカラーとして扱う。
+  // 例: Re(z) + i*Im(z) が元の z と同じ向きになるようにする。
   const fnReplacers = [
     ['Re', (converted) => `[${converted}[0], 0]`],
-    ['Im', (converted) => `[0, ${converted}[1]]`],
+    ['Im', (converted) => `[${converted}[1], 0]`],
     ['conj', (converted) => `complexConj(${converted})`],
     ['exp', (converted) => `complexExp(${converted})`],
     ['sin', (converted) => `complexSin(${converted})`],

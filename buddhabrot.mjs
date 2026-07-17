@@ -263,6 +263,9 @@ export class BuddhabrotRunner {
         gamma: params.gamma ?? DEFAULT_CONFIG.GAMMA,
         buddhaBandMode: params.buddhaBandMode || DEFAULT_CONFIG.BAND_MODE,
         renderDelay: this.renderDelay, // 速度設定をワーカーへ渡す
+        fractalType: params.fractalType || null,
+        juliaRe: params.juliaRe,
+        juliaIm: params.juliaIm,
         // 必要なら初期 z0 を上書きする
         z0Real: params.z0Real,
         z0Imag: params.z0Imag,

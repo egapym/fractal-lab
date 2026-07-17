@@ -159,7 +159,7 @@ export class BuddhabrotWebGPU {
     let uniformBuf = this._cachedBuffers?.uniformBuf
     if (!uniformBuf) {
       uniformBuf = device.createBuffer({
-        size: 80,
+        size: 96,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
       })
       this._cachedBuffers.uniformBuf = uniformBuf
@@ -168,7 +168,8 @@ export class BuddhabrotWebGPU {
     // 簡易 WGSL カーネルを組み立てる。
     // CPU 版と完全一致ではないが、GPU 側での加算処理を行える。
     let customWGSLIteration = null
-    let customIterationSupported = fractalType === 'mandelbrot'
+    let customIterationSupported =
+      fractalType === 'mandelbrot' || fractalType === 'julia' || fractalType === 'julia-custom'
     if (params.iterationFunction) {
       try {
         const parser = await import('./customFunctionParser.mjs')
@@ -213,6 +214,9 @@ struct Uniforms {
   centerX: f32, centerY: f32, zoom: f32,
   z0x: f32, z0y: f32,
   escapeRadius: f32,
+  isJulia: u32,
+  juliaCr: f32,
+  juliaCi: f32,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read_write> rAcc: array<atomic<u32>>;
@@ -253,14 +257,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let halfW = f32(u.width) / 2.0;
   let halfH = f32(u.height) / 2.0;
     for (var si: u32 = 0u; si < spt; si = si + 1u) {
-    let rpx = rand(&state) * f32(u.width);
-    let rpy = rand(&state) * f32(u.height);
-  let rx = (rpx - halfW) * invDenom_local + u.centerX;
-  let ry = (rpy - halfH) * invDenom_local + u.centerY;
-    var z = vec2<f32>(u.z0x, u.z0y);
-    let c = vec2<f32>(rx, ry);
-    var escaped = false;
-    var iter: u32 = 0u;
+	    let rpx = rand(&state) * f32(u.width);
+	    let rpy = rand(&state) * f32(u.height);
+	  let rx = (rpx - halfW) * invDenom_local + u.centerX;
+	  let ry = (rpy - halfH) * invDenom_local + u.centerY;
+	    let sample = vec2<f32>(rx, ry);
+	    let c = select(sample, vec2<f32>(u.juliaCr, u.juliaCi), u.isJulia != 0u);
+	    var z = select(vec2<f32>(u.z0x, u.z0y), sample, u.isJulia != 0u);
+	    var escaped = false;
+	    var iter: u32 = 0u;
     // カスタム式で反復する。式は vec2<f32> を返す必要がある
     loop {
       if (iter >= u.maxIter) { break; }
@@ -275,10 +280,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let zzq = dot(z, z);
       if (zzq > u.escapeRadius * u.escapeRadius) { escaped = true; break; }
       iter = iter + 1u;
-    }
-    if (!((escaped && u.mode == 0u) || (!escaped && u.mode == 1u))) { continue; }
-  // z0 から軌道をもう一度たどり、密度へ加算する
-  z = vec2<f32>(u.z0x, u.z0y);
+	    }
+	    if (!((escaped && u.mode == 0u) || (!escaped && u.mode == 1u))) { continue; }
+	  // z0 から軌道をもう一度たどり、密度へ加算する
+	  z = select(vec2<f32>(u.z0x, u.z0y), sample, u.isJulia != 0u);
     // bandMode == 1（perTrajectory）なら軌道全体で使う band を先に決める
     var trajBandIdx: u32 = 0u;
     if (u.bandMode == 1u) {
@@ -289,6 +294,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       while (bi_t < u.bandCount && fracTraj >= bands[bi_t].color.a) { bi_t = bi_t + 1u; }
       trajBandIdx = bi_t;
       if (trajBandIdx >= u.bandCount) { trajBandIdx = u.bandCount - 1u; }
+    }
+    if (u.isJulia != 0u) {
+      let pcoords0 = coordToIndex(sample.x, sample.y);
+      let fx0 = pcoords0.x;
+      let fy0 = pcoords0.y;
+      if (!(fx0 < 0.0 || fy0 < 0.0 || fx0 >= f32(u.width) || fy0 >= f32(u.height))) {
+        let px0 = u32(fx0);
+        let py0 = u32(fy0);
+        let idx0 = py0 * u.width + px0;
+        var bandIdx0: u32 = 0u;
+        if (u.bandMode == 1u) {
+          bandIdx0 = trajBandIdx;
+        } else {
+          var bi0: u32 = 0u;
+          while (bi0 < u.bandCount && 0.0 >= bands[bi0].color.a) { bi0 = bi0 + 1u; }
+          bandIdx0 = bi0;
+          if (bandIdx0 >= u.bandCount) { bandIdx0 = u.bandCount - 1u; }
+        }
+        let contribVec0 = bandContribs[bandIdx0];
+        atomicAdd(&rAcc[idx0], contribVec0.x);
+        atomicAdd(&gAcc[idx0], contribVec0.y);
+        atomicAdd(&bAcc[idx0], contribVec0.z);
+      }
     }
     for (var oi: u32 = 0u; oi < iter; oi = oi + 1u) {
       // 一時変数へ評価してから妥当性を確認する
@@ -441,6 +469,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // escapeRadius を offset 64 に書き込む
     const erView = new Float32Array([params.escapeRadius !== undefined ? params.escapeRadius : 4.0])
     device.queue.writeBuffer(uniformBuf, 64, erView.buffer, 0, erView.byteLength)
+    const isJulia = fractalType === 'julia' || fractalType === 'julia-custom'
+    const isJuliaView = new Uint32Array([isJulia ? 1 : 0])
+    device.queue.writeBuffer(uniformBuf, 68, isJuliaView.buffer, 0, isJuliaView.byteLength)
+    const juliaView = new Float32Array([params.juliaRe ?? 0.0, params.juliaIm ?? 0.0])
+    device.queue.writeBuffer(uniformBuf, 72, juliaView.buffer, 0, juliaView.byteLength)
 
     // Mandelbrot 以外でも反復式を WGSL 化できるなら GPU 経路を使う。
     // 変換できない式だけは、上位で CPU フォールバックできるよう例外にする。

@@ -202,6 +202,10 @@ async function runSampling(opts) {
   const buddhaBandMode = opts.buddhaBandMode || SAMPLING_CONFIG.DEFAULT_BAND_MODE
   const compiledIter = opts.iterationFunctionCompiled || null
   const escapeRadiusSq = opts.escapeRadius !== undefined ? opts.escapeRadius * opts.escapeRadius : 4
+  const fractalType = opts.fractalType || 'mandelbrot'
+  const isJulia = fractalType === 'julia' || fractalType === 'julia-custom'
+  const fixedJuliaRe = typeof opts.juliaRe === 'number' ? opts.juliaRe : 0
+  const fixedJuliaIm = typeof opts.juliaIm === 'number' ? opts.juliaIm : 0
 
   // パレット入力を正規化する。対応形式は { bands: [{ color, ratio }, ...] } のみ
   let bands = null
@@ -244,8 +248,8 @@ async function runSampling(opts) {
   // 反復回数が非常に大きいときだけ Float64 に切り替える。
   const trajBuf =
     maxIter <= SAMPLING_CONFIG.MAX_ITER_FLOAT32_THRESHOLD
-      ? new Float32Array(maxIter * 2)
-      : new Float64Array(maxIter * 2)
+      ? new Float32Array((maxIter + (isJulia ? 1 : 0)) * 2)
+      : new Float64Array((maxIter + (isJulia ? 1 : 0)) * 2)
 
   // 軽量な xorshift32 乱数生成器を worker 実行ごとに 1 回だけ初期化する。
   // ホットループ内で Math.random() を何度も呼ばないための工夫。
@@ -369,33 +373,40 @@ async function runSampling(opts) {
 
   for (let s = 0; s < samples && jobCtx.isActive(); s++) {
     // 表示領域内のランダム点を選ぶ（PRNG を使用）
-    const re = left + randf() * (right - left)
-    const im = top + randf() * (bottom - top)
+    const sampleRe = left + randf() * (right - left)
+    const sampleIm = top + randf() * (bottom - top)
+    const cr = isJulia ? fixedJuliaRe : sampleRe
+    const ci = isJulia ? fixedJuliaIm : sampleIm
 
     // 反復を開始
-    // z0 が指定されていればそれを使い、なければ 0 からスタート
-    let zx = typeof opts.z0Real === 'number' ? opts.z0Real : 0
-    let zy = typeof opts.z0Imag === 'number' ? opts.z0Imag : 0
+    // Julia は画素側を z0 とし、Mandelbrot / Custom は従来どおり固定 z0 から始める
+    let zx = isJulia ? sampleRe : typeof opts.z0Real === 'number' ? opts.z0Real : 0
+    let zy = isJulia ? sampleIm : typeof opts.z0Imag === 'number' ? opts.z0Imag : 0
     let escaped = false
     let trajLen = 0
+    if (isJulia) {
+      trajBuf[0] = sampleRe
+      trajBuf[1] = sampleIm
+      trajLen = 1
+    }
     // trajBuf を再利用し、長さを trajLen で管理する
     for (let iter = 0; iter < maxIter; iter++) {
       // コンパイル済み反復関数があればそれを使い、なければ z^2 + c を使う
       let x2, y2
       if (compiledIter) {
         try {
-          const res = compiledIter(zx, zy, re, im)
+          const res = compiledIter(zx, zy, cr, ci)
           x2 = Number(res[0])
           y2 = Number(res[1])
         } catch (_e) {
           // コンパイル済み関数の実行に失敗した場合は通常の z^2 + c に戻す
-          x2 = zx * zx - zy * zy + re
-          y2 = 2 * zx * zy + im
+          x2 = zx * zx - zy * zy + cr
+          y2 = 2 * zx * zy + ci
         }
       } else {
         // z = z^2 + c  (実部/虚部)
-        x2 = zx * zx - zy * zy + re
-        y2 = 2 * zx * zy + im
+        x2 = zx * zx - zy * zy + cr
+        y2 = 2 * zx * zy + ci
       }
       if (x2 * x2 + y2 * y2 > escapeRadiusSq) {
         // 次の z が発散する場合は脱出とみなし、脱出点自体は含めない

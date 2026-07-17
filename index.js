@@ -1583,7 +1583,13 @@ class JuliaRenderer {
     }
     if (useOrbitTrapGpu) return
     this._lastOrbitTrapGpuRenderKey = null
-    const lastScreenNr = this.jobLevel < 1 ? this.offscreens.length - 1 : this.jobLevel - 1
+    // GPU 描画では jobLevel が最終 offscreen を指したまま完了する。
+    // CPU と同じ jobLevel - 1 にすると、表示中の最終フレームが再着色されない。
+    const lastScreenNr = this._canUseGpu()
+      ? this.jobLevel
+      : this.jobLevel < 1
+        ? this.offscreens.length - 1
+        : this.jobLevel - 1
     for (let i = 0; i <= lastScreenNr; i++) {
       this.offscreens[i]?.render(this.palette, this.max_iter, this.smooth, this.paletteComponent.palette)
     }
@@ -2669,6 +2675,7 @@ const BuddhabrotState = {
   active: false,
   preservedDisplay: false,
   lockedByFractalChange: false,
+  targetKind: null,
 
   isViewEnabled() {
     return DOM.buddha.toggle?.checked
@@ -2678,6 +2685,7 @@ const BuddhabrotState = {
     this.runner = null
     this.active = false
     this.preservedDisplay = false
+    this.targetKind = null
   },
 
   setActive(value) {
@@ -2767,6 +2775,7 @@ try {
   const buddhaToggle = document.getElementById('buddha-toggle')
   if (buddhaToggle) {
     buddhaToggle.addEventListener('change', async (_e) => {
+      const target = getBuddhabrotTargetSnapshot()
       // ビットマップ保存中なら少し待ち、停止済み Buddhabrot の復元を安定させる
       try {
         if (!savedBuddhaImageData && savedBuddhaImageDataPromise) {
@@ -2785,10 +2794,19 @@ try {
         // すでに Buddhabrot 表示中なら何もしない
         if (buddhaActive) return
         // 停止前の Buddhabrot 画像があれば先に復元する
-        if (savedBuddhaImageData) {
+        if (savedBuddhaImageData && savedBuddhaImageData.targetKind === target.kind) {
           try {
-            const ctx = canvasElement.getContext('2d')
-            CanvasHelpers.restoreImage(ctx, savedBuddhaImageData, canvasElement.width, canvasElement.height)
+            if (target.kind === 'julia') {
+              clearJuliaOrbitCanvas()
+              if (detailPinnedState?.isJulia) {
+                clearPinnedDetailPopup()
+              } else if (detailHoverState?.isJulia) {
+                _clearDetailHoverState()
+              }
+              if (juliaCanvasElement) juliaCanvasElement.style.cursor = ''
+            }
+            restoreSavedImageToCanvas(savedBuddhaImageData, target.canvas)
+            BuddhabrotState.targetKind = target.kind
             buddhaActive = true
             buddhaToggle.disabled = false
             return
@@ -2796,6 +2814,8 @@ try {
             ErrorHelpers.warn('Error restoring saved Buddhabrot image:', err)
             // 復元できなければ下の再開処理へ進む
           }
+        } else if (savedBuddhaImageData && savedBuddhaImageData.targetKind !== target.kind) {
+          discardSavedBuddhaImageData()
         }
 
         // 以前の density バッファが残っていれば復元を試す
@@ -2813,6 +2833,15 @@ try {
           if (found) {
             try {
               buddhaActive = true
+              if (target.kind === 'julia') {
+                clearJuliaOrbitCanvas()
+                if (detailPinnedState?.isJulia) {
+                  clearPinnedDetailPopup()
+                } else if (detailHoverState?.isJulia) {
+                  _clearDetailHoverState()
+                }
+                if (juliaCanvasElement) juliaCanvasElement.style.cursor = ''
+              }
               // トグルは使える状態に戻す
               buddhaToggle.disabled = false
               // 保存済み density バッファを描画する
@@ -2849,23 +2878,24 @@ try {
           // Buddhabrot 状態は保ちつつ、通常フラクタル表示へ戻す
           try {
             // 保存時の状態と現在状態を比較する
-            const currentState = FractalStateHelpers.getCurrentState()
+            const displayTargetKind = BuddhabrotState.targetKind || target.kind
+            const displayCanvas = getBuddhabrotDisplayCanvas(displayTargetKind)
+            const currentState = FractalStateHelpers.getCurrentState(displayTargetKind)
             const match = savedFractalImageData && FractalStateHelpers.stateMatches(savedFractalImageData, currentState)
 
             if (match) {
-              const ctx = canvasElement.getContext('2d')
-              CanvasHelpers.restoreImage(ctx, savedFractalImageData, canvasElement.width, canvasElement.height)
+              restoreSavedImageToCanvas(savedFractalImageData, displayCanvas)
               // ビューが変わるまでは保存画像を残し、再オン時に再利用できるようにする
             } else {
               // Buddhabrot 表示中に通常フラクタル設定が変わっている可能性があるので、
               // パレット設定を反映し直してから正規の再描画を行う。
               fractal.initPallete(true)
 
-              redraw()
+              redrawBuddhabrotSourceView(displayTargetKind)
             }
           } catch (e) {
             ErrorHelpers.warn('Error restoring saved fractal image after turning off Buddha:', e)
-            redraw()
+            redrawBuddhabrotSourceView(BuddhabrotState.targetKind || target.kind)
           }
         }
       }
@@ -2931,14 +2961,218 @@ function buildPaletteFromId(id) {
   return colors
 }
 
+function getCurrentJuliaCFromMain() {
+  return {
+    re: fractal.center[0].toNumber ? fractal.center[0].toNumber() : 0,
+    im: fractal.center[1].toNumber ? fractal.center[1].toNumber() : 0,
+  }
+}
+
+function syncJuliaRendererSettingsFromMain() {
+  if (!juliaState?.renderer) return null
+  const renderer = juliaState.renderer
+  renderer.max_iter = fractal.max_iter
+  renderer.smooth = fractal.smooth
+  renderer.supersampling = fractal.supersampling
+  renderer.escapeRadius = fractal.escapeRadius !== undefined ? fractal.escapeRadius : 4.0
+  renderer.useGpu = fractal.useGpu
+  if (fractal.fractalType === 'custom') {
+    renderer.fractalType = 'julia-custom'
+    renderer.iterationFunction = fractal.iterationFunction
+  } else {
+    renderer.fractalType = 'julia'
+    renderer.iterationFunction = 'z*z + c'
+  }
+  renderer.syncSettings()
+  const juliaC = getCurrentJuliaCFromMain()
+  renderer.setJuliaC(juliaC.re, juliaC.im)
+  return { renderer, juliaC }
+}
+
+function getBuddhabrotTargetSnapshot() {
+  if (juliaState?.active && juliaState.renderer && juliaCanvasElement) {
+    const synced = syncJuliaRendererSettingsFromMain()
+    const renderer = synced?.renderer || juliaState.renderer
+    const juliaC = synced?.juliaC || getCurrentJuliaCFromMain()
+    return {
+      kind: 'julia',
+      canvas: juliaCanvasElement,
+      renderer,
+      fractalType: renderer.fractalType || 'julia',
+      iterationFunction: renderer.iterationFunction || 'z*z + c',
+      juliaRe: juliaC.re,
+      juliaIm: juliaC.im,
+    }
+  }
+  return {
+    kind: 'main',
+    canvas: canvasElement,
+    renderer: fractal,
+    fractalType: fractal?.fractalType || 'mandelbrot',
+    iterationFunction: fractal?.iterationFunction || '',
+    juliaRe: undefined,
+    juliaIm: undefined,
+  }
+}
+
+function getBuddhabrotDisplayCanvas(targetKind = BuddhabrotState.targetKind) {
+  if (targetKind === 'julia' && juliaCanvasElement) return juliaCanvasElement
+  return canvasElement
+}
+
+function getBuddhabrotProgressMonitor(targetKind = BuddhabrotState.targetKind) {
+  if (targetKind === 'julia') return juliaState?.renderer?.progress || null
+  return fractal?.progress || null
+}
+
+function hideProgressMonitor(progressMonitor) {
+  if (!progressMonitor) return
+  try {
+    progressMonitor._cancelPendingShow?.()
+    if (typeof progressMonitor._hide === 'function') {
+      progressMonitor._hide()
+    } else if (progressMonitor.canvas) {
+      progressMonitor.canvas.style.display = 'none'
+    }
+  } catch (e) {
+    console.warn('Error hiding progress monitor:', e?.message ? e.message : e)
+  }
+}
+
+function hideInactiveBuddhabrotProgress(targetKind = BuddhabrotState.targetKind) {
+  hideProgressMonitor(getBuddhabrotProgressMonitor(targetKind === 'julia' ? 'main' : 'julia'))
+}
+
+function finishBuddhabrotProgress(targetKind = BuddhabrotState.targetKind) {
+  const progressMonitor = getBuddhabrotProgressMonitor(targetKind)
+  if (!progressMonitor) return
+  try {
+    progressMonitor.finish?.()
+  } catch (e) {
+    console.warn('Error finishing Buddhabrot progress:', e?.message ? e.message : e)
+    hideProgressMonitor(progressMonitor)
+  }
+}
+
+function hasVisibleOrRunningBuddhabrot() {
+  return (
+    buddhaActive ||
+    buddhaPreservedDisplay ||
+    !!buddhaRunner ||
+    !!savedBuddhaImageData ||
+    !!savedBuddhaImageDataPromise ||
+    BuddhabrotState.isViewEnabled()
+  )
+}
+
+function isJuliaCanvasInteractionBlockedByBuddhabrot() {
+  return buddhaRenderPending || buddhaActive || BuddhabrotState.isViewEnabled()
+}
+
+function isBuddhabrotViewShownOnJulia() {
+  return (
+    BuddhabrotState.targetKind === 'julia' &&
+    BuddhabrotState.isViewEnabled() &&
+    (buddhaActive || buddhaPreservedDisplay || !!buddhaRunner || !!savedBuddhaImageData)
+  )
+}
+
+function isMainCanvasInteractionBlockedByBuddhabrot() {
+  return (buddhaActive || BuddhabrotState.isViewEnabled()) && !isBuddhabrotViewShownOnJulia()
+}
+
+function hasJuliaBuddhabrotState() {
+  return BuddhabrotState.targetKind === 'julia' || savedBuddhaImageData?.targetKind === 'julia'
+}
+
+function lockBuddhabrotViewToggle() {
+  buddhaLockedByFractalChange = true
+  const toggle = DOM.buddha.toggle || document.getElementById('buddha-toggle')
+  if (toggle) {
+    toggle.checked = false
+    toggle.disabled = true
+  }
+}
+
+function invalidateJuliaBuddhabrotView({ clearVisible = false } = {}) {
+  if (!hasJuliaBuddhabrotState()) return false
+  if (clearVisible && (BuddhabrotState.isViewEnabled() || buddhaActive)) {
+    stopAndClearBuddha()
+  } else {
+    if (BuddhabrotState.targetKind === 'julia' && buddhaRunner?.running) {
+      buddhaRunner.stop()
+    }
+    finishBuddhabrotProgress(BuddhabrotState.targetKind)
+    hideInactiveBuddhabrotProgress(BuddhabrotState.targetKind)
+    buddhaActive = false
+    buddhaPreservedDisplay = false
+    discardSavedBuddhaImageData()
+    savedFractalImageData = null
+    BuddhabrotState.targetKind = null
+    disableBuddhaDownload()
+  }
+  lockBuddhabrotViewToggle()
+  return true
+}
+
+function restoreSavedImageToCanvas(savedImageData, canvas) {
+  const ctx = canvas.getContext('2d')
+  CanvasHelpers.restoreImage(ctx, savedImageData, canvas.width, canvas.height)
+}
+
+function restoreFractalDisplayAfterClearingBuddha() {
+  if (!savedFractalImageData) return false
+  const canvas = getBuddhabrotDisplayCanvas(savedFractalImageData.targetKind)
+  if (!canvas) return false
+  restoreSavedImageToCanvas(savedFractalImageData, canvas)
+  return true
+}
+
+function redrawBuddhabrotSourceView(targetKind = BuddhabrotState.targetKind) {
+  if (targetKind === 'julia') {
+    redrawJulia()
+    return
+  }
+  redraw()
+}
+
+function discardSavedBuddhaImageData() {
+  savedBuddhaImageCaptureGeneration += 1
+  if (savedBuddhaImageData?.type === 'bitmap' && typeof savedBuddhaImageData.bitmap?.close === 'function') {
+    savedBuddhaImageData.bitmap.close()
+  }
+  savedBuddhaImageData = null
+  savedBuddhaImageDataPromise = null
+}
+
 /**
  * Buddhabrot の描画ジョブを開始する
  * @async
  * @throws {Error} 描画を開始できない場合
  */
 async function startBuddhaRender() {
+  const target = getBuddhabrotTargetSnapshot()
+  const targetCanvas = target.canvas
+  const targetRenderer = target.renderer
   // 呼び出し時点で Buddhabrot 表示中だったかを覚えておく
   const wasBuddhaActive = !!buddhaActive
+  const targetWasShowingBuddha =
+    BuddhabrotState.targetKind === target.kind && (wasBuddhaActive || BuddhabrotState.isViewEnabled())
+  const renderRequestGeneration = ++buddhaRenderRequestGeneration
+  buddhaRenderPending = true
+  const isBuddhaRenderRequestCurrent = () => renderRequestGeneration === buddhaRenderRequestGeneration
+  const abortIfBuddhaRenderCanceled = () => {
+    if (isBuddhaRenderRequestCurrent()) return false
+    buddhaRenderPending = false
+    return true
+  }
+
+  // 新しい Buddhabrot が完成するまでは、古い View 表示を切り替えられないようにする
+  const viewToggle = DOM.buddha.toggle || document.getElementById('buddha-toggle')
+  if (viewToggle) {
+    viewToggle.checked = false
+    viewToggle.disabled = true
+  }
 
   // 通常フラクタル描画が進行中なら止め、Buddhabrot に計算資源を譲る
   try {
@@ -2948,6 +3182,14 @@ async function startBuddhaRender() {
       if (Array.isArray(fractal.taskqueue)) fractal.taskqueue.length = 0
       // GPU 側にも停止を促す
       if (fractal.mandelbrotGpu) fractal.mandelbrotGpu.newTask = null
+      if (fractal.mandelbrotCustomGpu) fractal.mandelbrotCustomGpu.newTask = null
+      if (fractal.orbitTrapGpu) fractal.orbitTrapGpu.newTask = null
+    }
+    if (target.kind === 'julia' && juliaState.renderer) {
+      juliaState.renderer._revokeJobToken?.()
+      if (Array.isArray(juliaState.renderer.taskqueue)) juliaState.renderer.taskqueue.length = 0
+      if (juliaState.renderer.juliaGpu) juliaState.renderer.juliaGpu.newTask = null
+      if (juliaState.renderer.orbitTrapGpu) juliaState.renderer.orbitTrapGpu.newTask = null
     }
   } catch (e) {
     console.warn('Error attempting to stop normal fractal render before Buddhabrot start:', e?.message ? e.message : e)
@@ -2962,7 +3204,7 @@ async function startBuddhaRender() {
   let samples = parseInt(document.getElementById('buddha-iterations').value, 10)
   if (Number.isNaN(samples)) samples = 100000
   // 専用 supersampling UI は廃止済み。fractal 側の値があれば使う
-  const ss = fractal?.supersampling ? parseInt(fractal.supersampling, 10) : 0
+  const ss = targetRenderer?.supersampling ? parseInt(targetRenderer.supersampling, 10) : 0
   if (ss > 1) samples = Math.floor(samples * ss * ss)
 
   const palId = document.getElementById('buddha-palette').value
@@ -2989,57 +3231,42 @@ async function startBuddhaRender() {
   const _rawRenderDelay = parseFloat(document.getElementById('buddha-draw-speed')?.value) || 0
   const renderDelay = _rawRenderDelay === 1 ? 0.01 : _rawRenderDelay
 
-  // 開始前にメインキャンバス上の描画を整理する
-  const ctx = canvasElement.getContext('2d')
+  BuddhabrotState.targetKind = target.kind
+  if (target.kind === 'julia') {
+    clearJuliaOrbitCanvas()
+    if (detailPinnedState?.isJulia) {
+      clearPinnedDetailPopup()
+    } else if (detailHoverState?.isJulia) {
+      _clearDetailHoverState()
+    }
+    if (juliaCanvasElement) juliaCanvasElement.style.cursor = ''
+  }
+
+  // 開始前に対象キャンバス上の描画を整理する
+  const ctx = targetCanvas.getContext('2d')
   // 後で戻せるよう、通常フラクタル側の画像を必要時だけ保存する
   if (!wasBuddhaActive) {
     try {
-      const iterFn = fractal.iterationFunction || ''
-      const fType = fractal.fractalType || ''
-      // 比較しやすい文字列表現の中心座標と zoom を作る
-      const centerX = fxpToDecimalString(fractal.center[0], PRECISION_CONSTANTS.DECIMAL_STRING_PRECISION)
-      const centerY = fxpToDecimalString(fractal.center[1], PRECISION_CONSTANTS.DECIMAL_STRING_PRECISION)
-      const zoomStr = fxpToDecimalString(fractal.zoom, PRECISION_CONSTANTS.DECIMAL_STRING_PRECISION)
-      const centerStr = `${centerX}|${centerY}`
-      // Buddhabrot 中に通常フラクタル設定が変わったか判定できるよう付随情報も保存する
-      const paletteId = paletteComponent?.palette ? paletteComponent.palette.id : null
-      // 上の正規化済み比較に合わせ、文字列として保存する
-      const paletteDensity = paletteComponent ? String(paletteComponent.density) : null
-      const paletteRotate = paletteComponent ? String(paletteComponent.rotate) : null
-      const supersampling = fractal.supersampling
-      const fullres = document.getElementById('fullres') ? document.getElementById('fullres').checked : false
+      const currentState = FractalStateHelpers.getCurrentState(target.kind)
 
-      if (
-        !savedFractalImageData ||
-        savedFractalImageData.iterationFunction !== iterFn ||
-        savedFractalImageData.fractalType !== fType ||
-        savedFractalImageData.centerStr !== centerStr ||
-        savedFractalImageData.zoomStr !== zoomStr ||
-        savedFractalImageData.paletteId !== paletteId ||
-        savedFractalImageData.paletteDensity !== paletteDensity ||
-        savedFractalImageData.paletteRotate !== paletteRotate ||
-        savedFractalImageData.supersampling !== supersampling ||
-        savedFractalImageData.fullres !== fullres
-      ) {
+      if (targetWasShowingBuddha) {
+        // View ON の Buddhabrot 画像を通常フラクタルの復元元として保存しない。
+        // 座標変更後の再描画では、復元ではなく正規レンダーへ戻す。
+        if (!savedFractalImageData || !FractalStateHelpers.stateMatches(savedFractalImageData, currentState)) {
+          savedFractalImageData = null
+        }
+      } else if (!savedFractalImageData || !FractalStateHelpers.stateMatches(savedFractalImageData, currentState)) {
         // getImageData の読み戻し警告を避けるため、まず createImageBitmap を優先する。
         // startBuddhaRender は async なのでここで await できる。
         let captured = false
         if (typeof createImageBitmap === 'function') {
-          const bitmap = await createImageBitmap(canvasElement)
+          const bitmap = await createImageBitmap(targetCanvas)
           savedFractalImageData = {
+            ...currentState,
             type: 'bitmap',
             bitmap: bitmap,
-            iterationFunction: iterFn,
-            fractalType: fType,
-            centerStr: centerStr,
-            zoomStr: zoomStr,
-            paletteId: paletteId,
-            paletteDensity: paletteDensity,
-            paletteRotate: paletteRotate,
-            supersampling: supersampling,
-            fullres: fullres,
-            width: canvasElement.width,
-            height: canvasElement.height,
+            width: targetCanvas.width,
+            height: targetCanvas.height,
           }
           captured = true
         }
@@ -3047,8 +3274,8 @@ async function startBuddhaRender() {
         if (!captured) {
           // だめなら同期読み戻しへ切り替える。
           // 警告を減らすため、一度一時キャンバスへ描いてから getImageData を呼ぶ。
-          tempCanvas.width = canvasElement.width
-          tempCanvas.height = canvasElement.height
+          tempCanvas.width = targetCanvas.width
+          tempCanvas.height = targetCanvas.height
           let tempCtx
           try {
             tempCtx = tempCanvas.getContext('2d', {
@@ -3057,22 +3284,14 @@ async function startBuddhaRender() {
           } catch (_e) {
             tempCtx = tempCanvas.getContext('2d')
           }
-          // メインキャンバスを一時キャンバスへ描き写す
+          // 対象キャンバスを一時キャンバスへ描き写す
           tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height)
-          tempCtx.drawImage(canvasElement, 0, 0)
+          tempCtx.drawImage(targetCanvas, 0, 0)
           const img = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height)
           savedFractalImageData = {
+            ...currentState,
             type: 'imageData',
             imageData: img,
-            iterationFunction: iterFn,
-            fractalType: fType,
-            centerStr: centerStr,
-            zoomStr: zoomStr,
-            paletteId: paletteId,
-            paletteDensity: paletteDensity,
-            paletteRotate: paletteRotate,
-            supersampling: supersampling,
-            fullres: fullres,
           }
         }
       }
@@ -3082,10 +3301,11 @@ async function startBuddhaRender() {
       console.warn('Could not capture canvas ImageData for buddhabrot preservation:', e?.message ? e.message : e)
     }
   }
+  if (abortIfBuddhaRenderCanceled()) return
 
   ctx.save()
   ctx.fillStyle = 'black'
-  ctx.fillRect(0, 0, canvasElement.width, canvasElement.height)
+  ctx.fillRect(0, 0, targetCanvas.width, targetCanvas.height)
   ctx.restore()
 
   // 必要なら runner を作る。
@@ -3137,16 +3357,19 @@ async function startBuddhaRender() {
     try {
       buddhaRunner = new BuddhabrotRunner({
         workerCount: Math.max(1, DEFAULT_WORKER_COUNT),
-        width: canvasElement.width,
-        height: canvasElement.height,
-        maxIter: fractal.max_iter,
+        width: targetCanvas.width,
+        height: targetCanvas.height,
+        maxIter: targetRenderer.max_iter,
         samples: samples,
         renderDelay: renderDelay,
         onProgress: (data) => {
           // delta が来る場合はその差分で進捗を進める
           try {
-            if (data && typeof data.delta === 'number') fractal.progress.update(data.delta)
-            else fractal.progress.update(1)
+            if (!buddhaActive) return
+            const progressMonitor = getBuddhabrotProgressMonitor()
+            if (!progressMonitor) return
+            if (data && typeof data.delta === 'number') progressMonitor.update(data.delta)
+            else progressMonitor.update(1)
           } catch (e) {
             console.warn('Error updating progress from BuddhabrotRunner onProgress:', e?.message ? e.message : e)
           }
@@ -3161,7 +3384,8 @@ async function startBuddhaRender() {
         },
         onComplete: (result) => {
           try {
-            fractal.progress.finish()
+            finishBuddhabrotProgress()
+            hideInactiveBuddhabrotProgress()
           } catch (e) {
             console.warn('Error finishing progress after buddha complete:', e?.message ? e.message : e)
           }
@@ -3204,19 +3428,27 @@ async function startBuddhaRender() {
           if (buddhaPreservedDisplay) {
             requestAnimationFrame(() => {
               try {
+                const displayCanvas = getBuddhabrotDisplayCanvas(BuddhabrotState.targetKind)
+                const captureTargetKind = BuddhabrotState.targetKind
+                const captureGeneration = ++savedBuddhaImageCaptureGeneration
                 if (typeof createImageBitmap === 'function') {
-                  savedBuddhaImageDataPromise = createImageBitmap(canvasElement).then((bitmap) => {
+                  savedBuddhaImageDataPromise = createImageBitmap(displayCanvas).then((bitmap) => {
+                    if (captureGeneration !== savedBuddhaImageCaptureGeneration) {
+                      bitmap.close?.()
+                      return
+                    }
                     savedBuddhaImageData = {
                       type: 'bitmap',
                       bitmap,
-                      width: canvasElement.width,
-                      height: canvasElement.height,
+                      width: displayCanvas.width,
+                      height: displayCanvas.height,
+                      targetKind: captureTargetKind,
                     }
                     savedBuddhaImageDataPromise = null
                   })
                 } else {
-                  tempCanvas.width = canvasElement.width
-                  tempCanvas.height = canvasElement.height
+                  tempCanvas.width = displayCanvas.width
+                  tempCanvas.height = displayCanvas.height
                   let tCtx
                   try {
                     tCtx = tempCanvas.getContext('2d', {
@@ -3226,12 +3458,13 @@ async function startBuddhaRender() {
                     tCtx = tempCanvas.getContext('2d')
                   }
                   tCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height)
-                  tCtx.drawImage(canvasElement, 0, 0)
+                  tCtx.drawImage(displayCanvas, 0, 0)
                   savedBuddhaImageData = {
                     type: 'imageData',
                     imageData: tCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height),
                     width: tempCanvas.width,
                     height: tempCanvas.height,
+                    targetKind: captureTargetKind,
                   }
                 }
               } catch (e) {
@@ -3268,9 +3501,9 @@ async function startBuddhaRender() {
             const gpuRunner = await mod.createBuddhaRunner({
               useGpu: true,
               workerCount: Math.max(1, DEFAULT_WORKER_COUNT),
-              width: targetWidth || canvasElement.width,
-              height: targetHeight || canvasElement.height,
-              maxIter: fractal.max_iter,
+              width: targetCanvas.width,
+              height: targetCanvas.height,
+              maxIter: targetRenderer.max_iter,
               samples: samples,
               renderDelay: buddhaRunner.renderDelay,
               onProgress: buddhaRunner.onProgress,
@@ -3280,6 +3513,10 @@ async function startBuddhaRender() {
               gamma: buddhaRunner.gamma,
             })
 
+            if (abortIfBuddhaRenderCanceled()) {
+              gpuRunner?.terminate?.()
+              return
+            }
             if (!gpuRunner) return
 
             // GPU 初期化中に別 runner へ変わっていたら差し替えない
@@ -3300,20 +3537,23 @@ async function startBuddhaRender() {
               try {
                 const params = {
                   samples: oldRunner.samples || 0,
-                  maxIter: oldRunner.maxIter || fractal.max_iter,
-                  width: oldRunner.width || canvasElement.width,
-                  height: oldRunner.height || canvasElement.height,
+                  maxIter: oldRunner.maxIter || targetRenderer.max_iter,
+                  width: oldRunner.width || targetCanvas.width,
+                  height: oldRunner.height || targetCanvas.height,
                   center: oldRunner.center || {
-                    x: fractal.center[0].toNumber ? fractal.center[0].toNumber() : -0.5,
-                    y: fractal.center[1].toNumber ? fractal.center[1].toNumber() : 0,
+                    x: targetRenderer.center[0].toNumber ? targetRenderer.center[0].toNumber() : -0.5,
+                    y: targetRenderer.center[1].toNumber ? targetRenderer.center[1].toNumber() : 0,
                   },
-                  zoom: oldRunner.zoom || (fractal.zoom.toNumber ? fractal.zoom.toNumber() : 1),
+                  zoom: oldRunner.zoom || (targetRenderer.zoom.toNumber ? targetRenderer.zoom.toNumber() : 1),
                   supersampling: oldRunner.supersampling || 0,
                   palette: oldRunner.palette || pal,
                   mode: oldRunner.mode || mode,
                   brightness: oldRunner.brightness || brightness,
                   gamma: oldRunner.gamma || gamma,
-                  iterationFunction: oldRunner.iterationFunction || fractal.iterationFunction,
+                  iterationFunction: oldRunner.iterationFunction || target.iterationFunction,
+                  fractalType: oldRunner.fractalType || target.fractalType,
+                  juliaRe: oldRunner.juliaRe ?? target.juliaRe,
+                  juliaIm: oldRunner.juliaIm ?? target.juliaIm,
                 }
                 await buddhaRunner.start(params)
               } catch (e) {
@@ -3338,8 +3578,9 @@ async function startBuddhaRender() {
     scale = 1
   }
 
-  const targetWidth = Math.max(1, Math.round(canvasElement.width * scale))
-  const targetHeight = Math.max(1, Math.round(canvasElement.height * scale))
+  const targetWidth = Math.max(1, Math.round(targetCanvas.width * scale))
+  const targetHeight = Math.max(1, Math.round(targetCanvas.height * scale))
+  if (abortIfBuddhaRenderCanceled()) return
 
   if (scale === 1) {
     // 1x 描画では高解像度画像を作らないので、ダウンロードを無効化する
@@ -3363,27 +3604,26 @@ async function startBuddhaRender() {
 
   buddhaRunner.width = targetWidth
   buddhaRunner.height = targetHeight
-  buddhaRunner.maxIter = fractal.max_iter
+  buddhaRunner.maxIter = targetRenderer.max_iter
   let mode = 'buddha'
   const modeEl = document.getElementById('buddhaMode')
   mode = modeEl && typeof modeEl.value !== 'undefined' ? modeEl.value || 'buddha' : 'buddha'
   // Buddhabrot 用進捗を開始する。タスク総数は samples ベースの近似値を使う
   try {
     if (samples > 0) {
-      // 既存の進捗表示は開始前に閉じる
-      if (fractal?.progress) {
-        fractal.progress.finish()
-      }
+      // 既存の逆側進捗表示は開始前に閉じる
+      hideInactiveBuddhabrotProgress(target.kind)
       // ProgressMonitor はタスク数前提なので、sample 数をそのまま使う
-      fractal.progress.start(samples)
+      getBuddhabrotProgressMonitor(target.kind)?.start(samples)
     }
   } catch (e) {
-    console.warn('Error starting fractal.progress for buddha samples:', e?.message ? e.message : e)
+    console.warn('Error starting progress for buddha samples:', e?.message ? e.message : e)
   }
   // pal は {color, weight} の stop 配列としてワーカーへ渡す
   buddhaRunner.palette = pal
   // アクティブ扱いにして、操作を制限する
   buddhaActive = true
+  buddhaRenderPending = false
   // 手動開始時は、フラクタル変更由来のロックを解除する
   buddhaLockedByFractalChange = false
   // view トグルはここでは有効化せず、描画完了時に有効化する
@@ -3408,9 +3648,9 @@ async function startBuddhaRender() {
         const maybeGpu = await mod.createBuddhaRunner({
           useGpu: true,
           workerCount: Math.max(1, DEFAULT_WORKER_COUNT),
-          width: targetWidth || canvasElement.width,
-          height: targetHeight || canvasElement.height,
-          maxIter: fractal.max_iter,
+          width: targetWidth || targetCanvas.width,
+          height: targetHeight || targetCanvas.height,
+          maxIter: targetRenderer.max_iter,
           samples: samples,
           onProgress: buddhaRunner?.onProgress,
           onChunk: buddhaRunner?.onChunk,
@@ -3418,6 +3658,10 @@ async function startBuddhaRender() {
           brightness: buddhaRunner?.brightness,
           gamma: buddhaRunner?.gamma,
         })
+        if (abortIfBuddhaRenderCanceled()) {
+          maybeGpu?.terminate?.()
+          return
+        }
         if (maybeGpu) {
           buddhaRunner.terminate?.()
           buddhaRunner = maybeGpu
@@ -3430,32 +3674,35 @@ async function startBuddhaRender() {
 
   // 以前のデバッグ用フック跡。現在は使用しない
 
+  if (abortIfBuddhaRenderCanceled()) return
   const runnerToStart = buddhaRunner
   if (!runnerToStart || typeof runnerToStart.start !== 'function') {
     console.error('index.js: runnerToStart.start is not available', runnerToStart)
   }
   await runnerToStart.start({
     samples: samples,
-    maxIter: fractal.max_iter,
+    maxIter: targetRenderer.max_iter,
     width: buddhaRunner.width,
     height: buddhaRunner.height,
     center: {
-      x: fractal.center[0].toNumber ? fractal.center[0].toNumber() : -0.5,
-      y: fractal.center[1].toNumber ? fractal.center[1].toNumber() : 0,
+      x: targetRenderer.center[0].toNumber ? targetRenderer.center[0].toNumber() : -0.5,
+      y: targetRenderer.center[1].toNumber ? targetRenderer.center[1].toNumber() : 0,
     },
-    zoom: fractal.zoom.toNumber ? fractal.zoom.toNumber() : 1,
+    zoom: targetRenderer.zoom.toNumber ? targetRenderer.zoom.toNumber() : 1,
     // Buddhabrot 専用 supersampling UI があれば読む
-    supersampling: fractal.supersampling,
+    supersampling: targetRenderer.supersampling,
     palette: pal,
     mode: mode,
-    fractalType: fractal.fractalType,
+    fractalType: target.fractalType,
     brightness: brightness,
     gamma: gamma,
-    iterationFunction: fractal.iterationFunction,
+    iterationFunction: target.iterationFunction,
     // UI 側で指定された初期 z0 があれば含める
     z0Real: document.getElementById('z0-real') ? parseFloat(document.getElementById('z0-real').value) : undefined,
     z0Imag: document.getElementById('z0-imag') ? parseFloat(document.getElementById('z0-imag').value) : undefined,
-    escapeRadius: fractal.escapeRadius !== undefined ? fractal.escapeRadius : 4.0,
+    escapeRadius: targetRenderer.escapeRadius !== undefined ? targetRenderer.escapeRadius : 4.0,
+    juliaRe: target.juliaRe,
+    juliaIm: target.juliaIm,
     gpu: (() => {
       try {
         const bel = document.getElementById('buddha-gpu')
@@ -3483,6 +3730,7 @@ async function startBuddhaRender() {
  * @param {boolean} suppressToggleChange - true ならトグル状態を変えない
  */
 function stopAndClearBuddha(suppressToggleChange = false) {
+  const displayCanvas = getBuddhabrotDisplayCanvas()
   buddhaRunnerGeneration++
   buddhaRedrawScheduled = false
   if (buddhaRunner?.running) {
@@ -3506,10 +3754,17 @@ function stopAndClearBuddha(suppressToggleChange = false) {
     buddhaRunner = null
   }
 
-  const ctx = canvasElement.getContext('2d')
+  if (lastHighResBuddhaBitmap && typeof lastHighResBuddhaBitmap.close === 'function') {
+    lastHighResBuddhaBitmap.close()
+  }
+  lastHighResBuddhaBitmap = null
+  discardSavedBuddhaImageData()
+  _lastHighResBuddhaCanvas = null
+
+  const ctx = displayCanvas.getContext('2d')
   ctx.save()
   ctx.fillStyle = 'black'
-  ctx.fillRect(0, 0, canvasElement.width, canvasElement.height)
+  ctx.fillRect(0, 0, displayCanvas.width, displayCanvas.height)
   ctx.restore()
 
   // 停止時のトグル状態を整える
@@ -3526,21 +3781,19 @@ function stopAndClearBuddha(suppressToggleChange = false) {
   // Buddhabrot 消去時は高解像度ダウンロードも無効化する
   disableBuddhaDownload()
 
-  // 停止・消去時は進捗表示を隠す
-  if (progressElement) progressElement.style.display = 'none'
-
   // 進捗が積み上がらないようリセットする
   try {
-    if (fractal?.progress) {
-      fractal.progress.finish()
-    }
+    finishBuddhabrotProgress(BuddhabrotState.targetKind)
+    hideInactiveBuddhabrotProgress(BuddhabrotState.targetKind)
   } catch (e) {
     console.warn('Error finishing progress in stopAndClearBuddha():', e?.message ? e.message : e)
   }
+  BuddhabrotState.targetKind = null
 }
 
 // Buddhabrot ワーカーだけ止め、表示中のキャンバスは残す
 function stopBuddhaPreserveDisplay() {
+  const displayCanvas = getBuddhabrotDisplayCanvas()
   if (buddhaRunner?.running) {
     buddhaRunner.stop()
   }
@@ -3598,33 +3851,46 @@ function stopBuddhaPreserveDisplay() {
           data[di + 2] = (255 * bn) | 0
           data[di + 3] = 255
         }
-        offCtx.putImageData(img, 0, 0)
+	        offCtx.putImageData(img, 0, 0)
 
-        const mainCtx = canvasElement.getContext('2d')
-        const scale = Math.min(canvasElement.width / width, canvasElement.height / height)
-        const drawW = Math.max(1, Math.round(width * scale))
-        const drawH = Math.max(1, Math.round(height * scale))
-        const dx = Math.round((canvasElement.width - drawW) / 2)
-        const dy = Math.round((canvasElement.height - drawH) / 2)
-        mainCtx.clearRect(0, 0, canvasElement.width, canvasElement.height)
-        mainCtx.drawImage(off, 0, 0, width, height, dx, dy, drawW, drawH)
-      }
-    }
-  } catch (e) {
-    console.warn('Error flushing density to canvas in stopBuddhaPreserveDisplay():', e?.message ? e.message : e)
+	        const mainCtx = displayCanvas.getContext('2d')
+	        const scale = Math.min(displayCanvas.width / width, displayCanvas.height / height)
+	        const drawW = Math.max(1, Math.round(width * scale))
+	        const drawH = Math.max(1, Math.round(height * scale))
+	        const dx = Math.round((displayCanvas.width - drawW) / 2)
+	        const dy = Math.round((displayCanvas.height - drawH) / 2)
+	        mainCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height)
+	        mainCtx.drawImage(off, 0, 0, width, height, dx, dy, drawW, drawH)
+	      }
+	    }
+	  } catch (e) {
+	    console.warn('Error flushing density to canvas in stopBuddhaPreserveDisplay():', e?.message ? e.message : e)
   }
 
   // 今見えている Buddhabrot キャンバスを保存し、後で view 切り替え時に戻せるようにする
   // まず createImageBitmap を優先し、だめなら同期読み戻しへ切り替える。
+  const captureTargetKind = BuddhabrotState.targetKind
+  const captureGeneration = ++savedBuddhaImageCaptureGeneration
+  if (savedBuddhaImageData?.type === 'bitmap' && typeof savedBuddhaImageData.bitmap?.close === 'function') {
+    savedBuddhaImageData.bitmap.close()
+  }
+  savedBuddhaImageData = null
+  savedBuddhaImageDataPromise = null
   if (typeof createImageBitmap === 'function') {
     try {
-      savedBuddhaImageDataPromise = createImageBitmap(canvasElement).then((bitmap) => {
+      savedBuddhaImageDataPromise = createImageBitmap(displayCanvas).then((bitmap) => {
+        if (captureGeneration !== savedBuddhaImageCaptureGeneration) {
+          bitmap.close?.()
+          return
+        }
         savedBuddhaImageData = {
           type: 'bitmap',
           bitmap: bitmap,
-          width: canvasElement.width,
-          height: canvasElement.height,
+          width: displayCanvas.width,
+          height: displayCanvas.height,
+          targetKind: captureTargetKind,
         }
+        savedBuddhaImageDataPromise = null
       })
     } catch (_err) {
       // 下の同期読み戻しへ切り替える
@@ -3633,8 +3899,8 @@ function stopBuddhaPreserveDisplay() {
   }
   // createImageBitmap が使えない、または失敗した場合は同期読み戻しに切り替える
   if (!savedBuddhaImageData && !savedBuddhaImageDataPromise) {
-    tempCanvas.width = canvasElement.width
-    tempCanvas.height = canvasElement.height
+    tempCanvas.width = displayCanvas.width
+    tempCanvas.height = displayCanvas.height
     let tempCtx
     try {
       tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true })
@@ -3642,13 +3908,14 @@ function stopBuddhaPreserveDisplay() {
       tempCtx = tempCanvas.getContext('2d')
     }
     tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height)
-    tempCtx.drawImage(canvasElement, 0, 0)
+    tempCtx.drawImage(displayCanvas, 0, 0)
     const img = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height)
     savedBuddhaImageData = {
       type: 'imageData',
       imageData: img,
       width: tempCanvas.width,
       height: tempCanvas.height,
+      targetKind: captureTargetKind,
     }
   }
   // 停止後の UI トグル状態を整える
@@ -3670,14 +3937,10 @@ function stopBuddhaPreserveDisplay() {
   // 停止中・保持表示中は高解像度ダウンロードを無効化する
   disableBuddhaDownload()
 
-  // 停止中・保持表示中は進捗表示を隠す
-  if (progressElement) progressElement.style.display = 'none'
-
   // 再開時に進捗が積み上がらないようリセットする
   try {
-    if (fractal?.progress) {
-      fractal.progress.finish()
-    }
+    finishBuddhabrotProgress(BuddhabrotState.targetKind)
+    hideInactiveBuddhabrotProgress(BuddhabrotState.targetKind)
   } catch (e) {
     console.warn('Error finishing progress in stopBuddhaPreserveDisplay():', e?.message ? e.message : e)
   }
@@ -3687,6 +3950,8 @@ function drawBuddhaDensityChannels(rBuf, gBuf, bBuf, width, height, _pal, bright
   // Buddhabrot が非アクティブなら早めに抜ける
   // ただし保持表示モード中は、既存 density バッファの再マッピングだけ許可する
   if (!buddhaActive && !buddhaPreservedDisplay) return
+  const displayTargetKind = BuddhabrotState.targetKind || getBuddhabrotTargetSnapshot().kind
+  const displayCanvas = getBuddhabrotDisplayCanvas(displayTargetKind)
 
   // 3 チャンネル合計の最大値を求める
   let max = 0
@@ -3716,25 +3981,25 @@ function drawBuddhaDensityChannels(rBuf, gBuf, bBuf, width, height, _pal, bright
         height,
         brightness,
         gamma,
-      }).then((bitmap) => {
-        try {
-          _lastHighResBuddhaCanvas = null
-          if (lastHighResBuddhaBitmap && typeof lastHighResBuddhaBitmap.close === 'function') {
-            lastHighResBuddhaBitmap.close()
-          }
-          lastHighResBuddhaBitmap = bitmap
-          const mainCtx = canvasElement.getContext('2d')
-          mainCtx.save()
-          mainCtx.clearRect(0, 0, canvasElement.width, canvasElement.height)
-          mainCtx.imageSmoothingEnabled = true
-          const scale = Math.min(canvasElement.width / width, canvasElement.height / height)
-          const drawW = Math.max(1, Math.round(width * scale))
-          const drawH = Math.max(1, Math.round(height * scale))
-          const dx = Math.round((canvasElement.width - drawW) / 2)
-          const dy = Math.round((canvasElement.height - drawH) / 2)
-          mainCtx.drawImage(bitmap, 0, 0, width, height, dx, dy, drawW, drawH)
-          mainCtx.restore()
-        } catch (err) {
+	      }).then((bitmap) => {
+	        try {
+	          _lastHighResBuddhaCanvas = null
+	          if (lastHighResBuddhaBitmap && typeof lastHighResBuddhaBitmap.close === 'function') {
+	            lastHighResBuddhaBitmap.close()
+	          }
+	          lastHighResBuddhaBitmap = bitmap
+	          const mainCtx = displayCanvas.getContext('2d')
+	          mainCtx.save()
+	          mainCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height)
+	          mainCtx.imageSmoothingEnabled = true
+	          const scale = Math.min(displayCanvas.width / width, displayCanvas.height / height)
+	          const drawW = Math.max(1, Math.round(width * scale))
+	          const drawH = Math.max(1, Math.round(height * scale))
+	          const dx = Math.round((displayCanvas.width - drawW) / 2)
+	          const dy = Math.round((displayCanvas.height - drawH) / 2)
+	          mainCtx.drawImage(bitmap, 0, 0, width, height, dx, dy, drawW, drawH)
+	          mainCtx.restore()
+	        } catch (err) {
           console.warn('Error drawing bitmap from colorMapDensity:', err?.message ? err.message : err)
         }
       })
@@ -3767,15 +4032,15 @@ function drawBuddhaDensityChannels(rBuf, gBuf, bBuf, width, height, _pal, bright
       data[di + 3] = 255
     }
 
-    offCtx.putImageData(img, 0, 0)
-    _lastHighResBuddhaCanvas = off
+	    offCtx.putImageData(img, 0, 0)
+	    _lastHighResBuddhaCanvas = off
 
-    const mainCtx = canvasElement.getContext('2d')
-    const srcW = width
-    const srcH = height
-    const dstW = canvasElement.width
-    const dstH = canvasElement.height
-    if (srcW === 0 || srcH === 0 || dstW === 0 || dstH === 0) return
+	    const mainCtx = displayCanvas.getContext('2d')
+	    const srcW = width
+	    const srcH = height
+	    const dstW = displayCanvas.width
+	    const dstH = displayCanvas.height
+	    if (srcW === 0 || srcH === 0 || dstW === 0 || dstH === 0) return
     const scale = Math.min(dstW / srcW, dstH / srcH)
     const drawW = Math.max(1, Math.round(srcW * scale))
     const drawH = Math.max(1, Math.round(srcH * scale))
@@ -3811,6 +4076,7 @@ function drawBuddhaDensityChannels(rBuf, gBuf, bBuf, width, height, _pal, bright
 function remapSavedBuddhaImage(brightness, gamma) {
   try {
     if (!savedBuddhaImageData) return
+    const displayCanvas = getBuddhabrotDisplayCanvas(savedBuddhaImageData.targetKind)
     // 加工可能な ImageData を取り出す
     let imgData = null
     if (savedBuddhaImageData.type === 'imageData' && savedBuddhaImageData.imageData) {
@@ -3846,17 +4112,17 @@ function remapSavedBuddhaImage(brightness, gamma) {
       // alpha はそのまま維持する
     }
 
-    // 補正後画像を中央寄せ・拡大縮小してメインキャンバスへ描く
-    try {
-      const ctx = canvasElement.getContext('2d')
-      ctx.save()
-      ctx.clearRect(0, 0, canvasElement.width, canvasElement.height)
-      // 拡大縮小して描画する
-      const scale = Math.min(canvasElement.width / imgData.width, canvasElement.height / imgData.height)
-      const drawW = Math.max(1, Math.round(imgData.width * scale))
-      const drawH = Math.max(1, Math.round(imgData.height * scale))
-      const dx = Math.round((canvasElement.width - drawW) / 2)
-      const dy = Math.round((canvasElement.height - drawH) / 2)
+	    // 補正後画像を中央寄せ・拡大縮小してメインキャンバスへ描く
+	    try {
+	      const ctx = displayCanvas.getContext('2d')
+	      ctx.save()
+	      ctx.clearRect(0, 0, displayCanvas.width, displayCanvas.height)
+	      // 拡大縮小して描画する
+	      const scale = Math.min(displayCanvas.width / imgData.width, displayCanvas.height / imgData.height)
+	      const drawW = Math.max(1, Math.round(imgData.width * scale))
+	      const drawH = Math.max(1, Math.round(imgData.height * scale))
+	      const dx = Math.round((displayCanvas.width - drawW) / 2)
+	      const dy = Math.round((displayCanvas.height - drawH) / 2)
       // 補正後画像は一時 offscreen キャンバスへ置いてから描く
       const off = document.createElement('canvas')
       off.width = imgData.width
@@ -4353,21 +4619,28 @@ const FractalStateHelpers = {
   /**
    * 比較用に現在のフラクタル状態を取得する
    */
-  getCurrentState() {
-    const curCenterX = fxpToDecimalString(fractal.center[0], 30)
-    const curCenterY = fxpToDecimalString(fractal.center[1], 30)
+  getCurrentState(targetKind = 'main') {
+    const isJuliaTarget = targetKind === 'julia' && juliaState?.renderer
+    const renderer = isJuliaTarget ? juliaState.renderer : fractal
+    const juliaC = isJuliaTarget ? getCurrentJuliaCFromMain() : null
+    const juliaType = fractal.fractalType === 'custom' ? 'julia-custom' : 'julia'
+    const juliaIterationFunction = fractal.fractalType === 'custom' ? fractal.iterationFunction : 'z*z + c'
+    const curCenterX = fxpToDecimalString(renderer.center[0], 30)
+    const curCenterY = fxpToDecimalString(renderer.center[1], 30)
 
     return {
-      iterationFunction: fractal.iterationFunction || '',
-      fractalType: fractal.fractalType || '',
+      targetKind: isJuliaTarget ? 'julia' : 'main',
+      iterationFunction: isJuliaTarget ? juliaIterationFunction : renderer.iterationFunction || '',
+      fractalType: isJuliaTarget ? juliaType : renderer.fractalType || '',
       centerStr: `${curCenterX}|${curCenterY}`,
-      zoomStr: fxpToDecimalString(fractal.zoom, 30),
+      zoomStr: fxpToDecimalString(renderer.zoom, 30),
       paletteId: paletteComponent?.palette?.id || null,
       paletteDensity: paletteComponent ? String(paletteComponent.density) : null,
       paletteRotate: paletteComponent ? String(paletteComponent.rotate) : null,
-      supersampling: fractal.supersampling,
+      supersampling: isJuliaTarget ? fractal.supersampling : renderer.supersampling,
       fullres: DOM.app?.querySelector('#fullres')?.checked || false,
-      escapeRadius: fractal.escapeRadius,
+      escapeRadius: isJuliaTarget ? fractal.escapeRadius : renderer.escapeRadius,
+      juliaCStr: isJuliaTarget ? `${juliaC.re}|${juliaC.im}` : null,
     }
   },
 
@@ -4376,6 +4649,7 @@ const FractalStateHelpers = {
    */
   stateMatches(savedState, currentState) {
     return (
+      savedState.targetKind === currentState.targetKind &&
       savedState.iterationFunction === currentState.iterationFunction &&
       savedState.fractalType === currentState.fractalType &&
       savedState.centerStr === currentState.centerStr &&
@@ -4385,7 +4659,8 @@ const FractalStateHelpers = {
       savedState.paletteRotate === currentState.paletteRotate &&
       savedState.supersampling === currentState.supersampling &&
       savedState.fullres === currentState.fullres &&
-      savedState.escapeRadius === currentState.escapeRadius
+      savedState.escapeRadius === currentState.escapeRadius &&
+      savedState.juliaCStr === currentState.juliaCStr
     )
   },
 }
@@ -4402,6 +4677,8 @@ let savedFractalImageData = null
 let savedBuddhaImageData = null
 // savedBuddhaImageData 用の createImageBitmap 完了待ち Promise
 let savedBuddhaImageDataPromise = null
+// 古い非同期キャプチャが後から完了して保存画像を巻き戻さないようにする
+let savedBuddhaImageCaptureGeneration = 0
 
 // ダウンロード用に直近の高解像度 Buddhabrot キャンバスを保持する
 let _lastHighResBuddhaCanvas = null
@@ -4409,6 +4686,9 @@ let _lastHighResBuddhaCanvas = null
 let lastHighResBuddhaBitmap = null
 // 破棄済み runner から飛んでくる遅延描画を無効化するための世代番号
 let buddhaRunnerGeneration = 0
+// runner 生成前の非同期 Buddhabrot 開始リクエストをキャンセルするための世代番号
+let buddhaRenderRequestGeneration = 0
+let buddhaRenderPending = false
 
 function disableBuddhaDownload() {
   const btn = document.getElementById('buddha-download')
@@ -4472,7 +4752,7 @@ async function redraw(resetCaches, cooldown) {
   // Buddhabrot 実行中で reset を要求していない場合は、進行中の処理や表示を
   // 壊さないよう通常の再描画を行わない。resetCaches が true なら、先に停止と
   // 消去を済ませてから通常描画へ進める。
-  if (buddhaActive && !resetCaches) {
+  if (buddhaActive && !resetCaches && !isBuddhabrotViewShownOnJulia()) {
     return
   }
 
@@ -4481,12 +4761,12 @@ async function redraw(resetCaches, cooldown) {
       fractal.render(resetCaches)
       redrawTimeout = null
       // Julia が有効なら待機後にそちらも再描画する
-      if (juliaState.active) redrawJulia()
+      if (juliaState.active && !isJuliaCanvasInteractionBlockedByBuddhabrot()) redrawJulia()
     }, cooldown)
   } else {
     await fractal.render(resetCaches)
     // Julia が有効なら、現在の中心を c としてあわせて描画する
-    if (juliaState.active) redrawJulia()
+    if (juliaState.active && !isJuliaCanvasInteractionBlockedByBuddhabrot()) redrawJulia()
   }
 }
 
@@ -4501,26 +4781,10 @@ function showZoomFactor() {
  */
 function redrawJulia() {
   if (!juliaState.active || !juliaState.renderer) return
-  const renderer = juliaState.renderer
-  // メインのフラクタル設定を反映する
-  renderer.max_iter = fractal.max_iter
-  renderer.smooth = fractal.smooth
-  renderer.supersampling = fractal.supersampling
-  renderer.escapeRadius = fractal.escapeRadius !== undefined ? fractal.escapeRadius : 4.0
-  renderer.useGpu = fractal.useGpu
-  // フラクタル種別を同期する。カスタム関数なら julia-custom、通常は julia。
-  if (fractal.fractalType === 'custom') {
-    renderer.fractalType = 'julia-custom'
-    renderer.iterationFunction = fractal.iterationFunction
-  } else {
-    renderer.fractalType = 'julia'
-    renderer.iterationFunction = 'z*z + c'
-  }
-  renderer.syncSettings()
-  // Julia の c パラメータは現在の Mandelbrot 表示中心を使う
-  const cRe = fractal.center[0].toNumber()
-  const cIm = fractal.center[1].toNumber()
-  renderer.setJuliaC(cRe, cIm)
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) return
+  const synced = syncJuliaRendererSettingsFromMain()
+  if (!synced) return
+  const renderer = synced.renderer
   // ピクセルサイズは resizeToCanvasSize() 済みなので、オフスクリーンだけ確認する
   const jCanvas = document.getElementById('julia-canvas')
   if (jCanvas && jCanvas.width > 0 && jCanvas.height > 0) {
@@ -4753,6 +5017,51 @@ function cancelActiveMainRender() {
   }
 }
 
+function cancelActiveJuliaRender() {
+  try {
+    const renderer = juliaState?.renderer
+    if (!renderer) return
+    const hadActiveJob = !!renderer.jobToken
+    renderer._revokeJobToken?.()
+    if (Array.isArray(renderer.taskqueue)) renderer.taskqueue.length = 0
+    if (renderer.juliaGpu) renderer.juliaGpu.newTask = null
+    if (renderer.orbitTrapGpu) renderer.orbitTrapGpu.newTask = null
+    if (hadActiveJob) renderer.progress?.finish?.()
+  } catch (e) {
+    console.warn('Error canceling active Julia render:', e?.message ? e.message : e)
+  }
+}
+
+function stopRenderingForJuliaToggleDuringBuddhabrot() {
+  const shouldClearBuddhabrot = hasVisibleOrRunningBuddhabrot()
+  const hadBuddhabrotWork = buddhaRenderPending || shouldClearBuddhabrot
+  if (!hadBuddhabrotWork) return false
+
+  // startBuddhaRender() が runner 生成前の await 中でも、続きで描画を始めないようにする。
+  buddhaRenderRequestGeneration++
+  buddhaRenderPending = false
+  suppressResizeRedrawUntil = performance.now() + 500
+
+  cancelActiveMainRender()
+  cancelActiveJuliaRender()
+
+  if (shouldClearBuddhabrot) {
+    stopAndClearBuddha()
+    restoreFractalDisplayAfterClearingBuddha()
+  } else {
+    finishBuddhabrotProgress(BuddhabrotState.targetKind)
+    hideInactiveBuddhabrotProgress(BuddhabrotState.targetKind)
+    disableBuddhaDownload()
+    const toggle = DOM.buddha.toggle || document.getElementById('buddha-toggle')
+    if (toggle) {
+      toggle.checked = false
+      toggle.disabled = true
+    }
+  }
+
+  return true
+}
+
 const scaleFactor = 1.02 // ズームを滑らかにするため 1 スクロールあたり約 2% に抑える
 
 function zoomWithClicks(clicks, cooldown, options = {}) {
@@ -4909,12 +5218,13 @@ function maybeStartInteractivePanGpuRedraw() {
 }
 
 function zoomWithFactor(factor, cooldown, options = {}) {
-  if (buddhaActive) return
+  const buddhaOnJuliaView = isBuddhabrotViewShownOnJulia()
+  if (isMainCanvasInteractionBlockedByBuddhabrot()) return
   // stopBuddhaPreserveDisplay は runner が実行中のときだけ呼ぶ。
   // 停止済みで呼ぶと density バッファが同期描画され、ズームのたびに
   // Buddhabrot が一瞬フラクタルの上へ重なって見えてしまう。
   try {
-    if (buddhaRunner?.running) {
+    if (!buddhaOnJuliaView && buddhaRunner?.running) {
       stopBuddhaPreserveDisplay()
     }
   } catch (e) {
@@ -4922,14 +5232,16 @@ function zoomWithFactor(factor, cooldown, options = {}) {
   }
   // ユーザーが明示的にズームしたら、Buddha トグルをロックして無効化する
   try {
-    buddhaLockedByFractalChange = true
-    buddhaPreservedDisplay = false
-    const t = document.getElementById('buddha-toggle')
-    if (t) {
-      t.checked = false
-      t.disabled = true
+    if (!buddhaOnJuliaView) {
+      buddhaLockedByFractalChange = true
+      buddhaPreservedDisplay = false
+      const t = document.getElementById('buddha-toggle')
+      if (t) {
+        t.checked = false
+        t.disabled = true
+      }
     }
-    // 表示が変わるので、保存済みの通常フラクタル画像は無効化する
+    // main 側を動かすと、元の Julia スナップショットは古くなる。
     savedFractalImageData = null
   } catch (e) {
     console.warn('Error disabling buddha toggle on zoom:', e?.message ? e.message : e)
@@ -4985,8 +5297,7 @@ function zoomWithFactor(factor, cooldown, options = {}) {
 
 function handleScroll(evt) {
   // Buddhabrot 表示中、またはトグルがオンならホイールズームを無効化する
-  const t = document.getElementById('buddha-toggle')
-  if (buddhaActive || t?.checked) {
+  if (isMainCanvasInteractionBlockedByBuddhabrot()) {
     // ページ全体のズームやスクロールを防ぐ
     if (evt && typeof evt.preventDefault === 'function') evt.preventDefault()
     return
@@ -5004,6 +5315,10 @@ function handleJuliaScroll(evt) {
     evt.preventDefault()
     return
   }
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+    evt.preventDefault()
+    return
+  }
   const delta = getWheelZoomDelta(evt)
   if (!delta) {
     evt.preventDefault()
@@ -5018,6 +5333,7 @@ function handleJuliaScroll(evt) {
     evt.preventDefault()
     return
   }
+  invalidateJuliaBuddhabrotView()
 
   // Julia キャンバス基準のマウス位置を求める
   const rect = renderer.canvas.getBoundingClientRect()
@@ -5074,6 +5390,11 @@ function _juliaCanvasCoordsFromClient(clientX, clientY) {
 
 function _juliaDocMouseMove(evt) {
   if (!juliaState.active || !juliaState.renderer || !juliaDragStart) return
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+    _endJuliaDrag()
+    if (evt?.cancelable) evt.preventDefault()
+    return
+  }
   if ((evt.buttons & 1) === 0) {
     _endJuliaDrag()
     return
@@ -5084,6 +5405,7 @@ function _juliaDocMouseMove(evt) {
 
   const dx = x - juliaDragStart[0]
   const dy = y - juliaDragStart[1]
+  if (dx !== 0 || dy !== 0) invalidateJuliaBuddhabrotView()
   if (detailPinnedState) clearPinnedDetailPopup()
 
   const p = renderer.precision
@@ -5115,6 +5437,10 @@ function _endJuliaDrag() {
 
 function onJuliaMouseDown(evt) {
   if (!juliaState.active || !juliaState.renderer) return
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+    if (evt?.cancelable) evt.preventDefault()
+    return
+  }
   _juliaPinDragged = false
   juliaDragStart = _juliaCanvasCoords(evt)
   // ポインターが他要素へ乗ってもドラッグを続けられるよう、
@@ -5124,6 +5450,10 @@ function onJuliaMouseDown(evt) {
 }
 
 function onJuliaMouseMove(evt) {
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+    if (juliaCanvasElement) juliaCanvasElement.style.cursor = ''
+    return
+  }
   // 固定した Julia 軌道の十字付近では、解除できることが分かるようポインター表示にする
   if (orbitDrawEnabled && juliaPinnedOrbit && juliaState.active && juliaState.renderer) {
     const renderer = juliaState.renderer
@@ -5717,6 +6047,7 @@ function clearJuliaOrbitCanvas() {
  * @param refPixY   任意: z0Imag に対応する Julia キャンバスの物理ピクセル Y
  */
 function drawOrbitOnJuliaCanvasAtComplex(z0Real, z0Imag, refPixX = null, refPixY = null) {
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) return
   if (!juliaState.active || !juliaState.renderer) return
   const jOrbitCanvas = document.getElementById('julia-orbit-canvas')
   if (!jOrbitCanvas) return
@@ -5870,6 +6201,7 @@ function _togglePinnedOrbitAtClient(clientX, clientY) {
 
 function _togglePinnedJuliaOrbitAtClient(clientX, clientY) {
   const renderer = juliaState.renderer
+  if (isJuliaCanvasInteractionBlockedByBuddhabrot()) return
   if (!juliaState.active || !renderer) return
   const [px, py] = toGraphicsCoordinatesOnCanvas(renderer.canvas, clientX, clientY)
   const jZoom = renderer.zoom.toNumber ? renderer.zoom.toNumber() : 1
@@ -5905,12 +6237,7 @@ function _togglePinnedJuliaOrbitAtClient(clientX, clientY) {
 function onMouseDown(evt) {
   // Buddhabrot 表示中、またはトグルがオンの間は、表示を固定するため
   // パンやドラッグの開始を許可しない。
-  try {
-    const t = document.getElementById('buddha-toggle')
-    if (buddhaActive || t?.checked) return
-  } catch (_e) {
-    if (buddhaActive) return
-  }
+  if (isMainCanvasInteractionBlockedByBuddhabrot()) return
   _orbitPinDragged = false
   updateMousePos(evt)
   dragStart = [lastX, lastY]
@@ -5918,6 +6245,7 @@ function onMouseDown(evt) {
 
 function onMouseMove(evt) {
   const [clientX, clientY] = _getClientCoordinatesFromEvent(evt)
+  const buddhaOnJuliaView = isBuddhabrotViewShownOnJulia()
   // 固定した軌道の十字付近では、解除できることが分かるようポインター表示にする
   if (orbitDrawEnabled && pinnedOrbit) {
     const [px_c, py_c] = toGraphicsCoordinates(clientX, clientY)
@@ -5956,12 +6284,7 @@ function onMouseMove(evt) {
     } catch (_e) {}
   }
   // Buddhabrot 表示中、またはトグルがオンの間はパンとドラッグを止める
-  try {
-    const t = document.getElementById('buddha-toggle')
-    if (buddhaActive || t?.checked) return
-  } catch (_e) {
-    if (buddhaActive) return
-  }
+  if (isMainCanvasInteractionBlockedByBuddhabrot()) return
   updateMousePos(evt)
   if (evt.type === 'mousemove' && (evt.buttons & 1) === 0) {
     // 外からキャンバスへ入ったときの意図しないドラッグ開始を防ぐ
@@ -5978,7 +6301,7 @@ function onMouseMove(evt) {
     // 停止後に呼ぶと density がキャンバスへ描かれ、パンのたびに
     // Buddhabrot がフラクタルの上へ一瞬重なって見える。
     try {
-      if (buddhaRunner?.running) {
+      if (!buddhaOnJuliaView && buddhaRunner?.running) {
         stopBuddhaPreserveDisplay()
       }
     } catch (e) {
@@ -5986,12 +6309,14 @@ function onMouseMove(evt) {
     }
     // ユーザー操作で表示を動かしたときは、ずれた表示で Buddhabrot を
     // 誤って再表示しないよう、Buddha トグルをロックして無効化する。
-    buddhaLockedByFractalChange = true
-    buddhaPreservedDisplay = false
-    const t = document.getElementById('buddha-toggle')
-    if (t) {
-      t.checked = false
-      t.disabled = true
+    if (!buddhaOnJuliaView) {
+      buddhaLockedByFractalChange = true
+      buddhaPreservedDisplay = false
+      const t = document.getElementById('buddha-toggle')
+      if (t) {
+        t.checked = false
+        t.disabled = true
+      }
     }
     // 表示を動かしたので保存済み画像を無効化する
     savedFractalImageData = null
@@ -6089,6 +6414,7 @@ function toGraphicsCoordinatesOnCanvas(canvas, clientX, clientY) {
 // ホバーポップアップに表示する情報を計算する
 function computeMouseDetails(clientX, clientY, isJulia) {
   if (isJulia) {
+    if (isJuliaCanvasInteractionBlockedByBuddhabrot()) return null
     if (!juliaState.active || !juliaState.renderer) return null
     const canvas = juliaCanvasElement
     const [px, py] = toGraphicsCoordinatesOnCanvas(canvas, clientX, clientY)
@@ -6312,6 +6638,14 @@ function initDetailsFeature() {
   })
   if (juliaCanvasElement) {
     juliaCanvasElement.addEventListener('mousemove', (evt) => {
+      if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+        if (detailPinnedState?.isJulia) {
+          clearPinnedDetailPopup()
+        } else if (detailHoverState?.isJulia) {
+          _clearDetailHoverState()
+        }
+        return
+      }
       if (!detailEnabled || detailPinnedState) return
       _setDetailHoverState(evt.clientX, evt.clientY, true)
     })
@@ -6438,6 +6772,11 @@ let resizeRafId = null
 let pendingResizeEntries = null
 let lastAppliedCanvasSizeKey = ''
 let lastKnownViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0
+let suppressResizeRedrawUntil = 0
+
+function shouldSuppressResizeRedraw() {
+  return performance.now() < suppressResizeRedrawUntil
+}
 
 function setStyleIfChanged(element, property, value) {
   if (!element) return false
@@ -6542,7 +6881,7 @@ function resizeToCanvasSize() {
       const sizeEl = document.getElementById('sizeValue')
       if (sizeEl) sizeEl.innerText = `${Math.round(vw * dprFs)}x${Math.round(vh * dprFs)}`
       showZoomFactor()
-      redraw()
+      if (!shouldSuppressResizeRedraw()) redraw()
       return
     }
 
@@ -6639,7 +6978,7 @@ function resizeToCanvasSize() {
 
     if (mainCanvasChanged) fractal.resized()
     showZoomFactor()
-    if (mainCanvasChanged) redraw()
+    if (mainCanvasChanged && !shouldSuppressResizeRedraw()) redraw()
     return
   }
 
@@ -6717,7 +7056,7 @@ function resizeToCanvasSize() {
 
   if (mainCanvasChanged) fractal.resized()
   showZoomFactor()
-  redraw()
+  if (!shouldSuppressResizeRedraw()) redraw()
 }
 
 function toggleFullScreen() {
@@ -6809,7 +7148,8 @@ function initListeners() {
       }
 
       buddhaActive = false
-      fractal.progress.finish()
+      finishBuddhabrotProgress(BuddhabrotState.targetKind)
+      hideInactiveBuddhabrotProgress(BuddhabrotState.targetKind)
 
       // 全画面切替でキャンバスサイズや scale が変わるため、保存画像を無効化する
       savedFractalImageData = null
@@ -6907,6 +7247,7 @@ function initListeners() {
     })
     juliaCanvasElement.addEventListener('click', (evt) => {
       if (performance.now() < suppressJuliaOrbitClickUntil) return
+      if (isJuliaCanvasInteractionBlockedByBuddhabrot()) return
       if (!orbitDrawEnabled || _juliaPinDragged || !juliaState.active) return
       _togglePinnedJuliaOrbitAtClient(evt.clientX, evt.clientY)
     })
@@ -6914,6 +7255,14 @@ function initListeners() {
       'touchstart',
       (evt) => {
         if (!juliaState.active || !juliaState.renderer) return
+        if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+          if (evt.cancelable) evt.preventDefault()
+          onJuliaMouseUp()
+          juliaLastTouchDistance = null
+          juliaLastTouchCenter = null
+          juliaOrbitTouchTapCandidate = false
+          return
+        }
         if (evt.cancelable) evt.preventDefault()
         if (evt.touches.length === 1) {
           juliaOrbitTouchTapCandidate = true
@@ -6941,6 +7290,14 @@ function initListeners() {
       'touchmove',
       (evt) => {
         if (!juliaState.active || !juliaState.renderer) return
+        if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+          if (evt.cancelable) evt.preventDefault()
+          onJuliaMouseUp()
+          juliaLastTouchDistance = null
+          juliaLastTouchCenter = null
+          juliaOrbitTouchTapCandidate = false
+          return
+        }
         if (evt.cancelable) evt.preventDefault()
 
         if (evt.touches.length === 1 && juliaDragStart) {
@@ -6948,6 +7305,7 @@ function initListeners() {
           const [x, y] = _juliaCanvasCoordsFromClient(evt.touches[0].clientX, evt.touches[0].clientY)
           const dx = x - juliaDragStart[0]
           const dy = y - juliaDragStart[1]
+          if (dx !== 0 || dy !== 0) invalidateJuliaBuddhabrotView()
           if (detailPinnedState) clearPinnedDetailPopup()
 
           const p = renderer.precision
@@ -6994,6 +7352,7 @@ function initListeners() {
           const [newCenterX, newCenterY] = _juliaCanvasCoordsFromClient(newTouchCenter[0], newTouchCenter[1])
           const dx = newCenterX - lastCenterX
           const dy = newCenterY - lastCenterY
+          if (factor !== 1 || dx !== 0 || dy !== 0) invalidateJuliaBuddhabrotView()
           if (detailPinnedState) clearPinnedDetailPopup()
           const w_fx = fxp.fromNumber(renderer.width, p)
           const scale_fx = renderer.zoom.withScale(p).multiply(w_fx).divide(fxp.fromNumber(4, p))
@@ -7020,6 +7379,13 @@ function initListeners() {
       { passive: false },
     )
     juliaCanvasElement.addEventListener('touchend', (evt) => {
+      if (isJuliaCanvasInteractionBlockedByBuddhabrot()) {
+        onJuliaMouseUp()
+        juliaLastTouchDistance = null
+        juliaLastTouchCenter = null
+        juliaOrbitTouchTapCandidate = false
+        return
+      }
       const touch = juliaOrbitTouchTapCandidate && evt.changedTouches?.length === 1 ? evt.changedTouches[0] : null
       onJuliaMouseUp()
       juliaLastTouchDistance = null
@@ -7077,8 +7443,7 @@ function initListeners() {
         orbitTouchTapCandidate = false
         if (evt.cancelable && document.fullscreenElement == null) evt.preventDefault()
         // Buddhabrot 表示中、またはトグルがオンならピンチ操作を無視する
-        const t = document.getElementById('buddha-toggle')
-        if (buddhaActive || t?.checked) {
+        if (isMainCanvasInteractionBlockedByBuddhabrot()) {
           // 次のジェスチャーが乱れないよう、基準距離と中心だけは更新する
           lastTouchDistance = Math.hypot(
             evt.touches[0].pageX - evt.touches[1].pageX,
@@ -7676,6 +8041,7 @@ function initListeners() {
         try {
           await startBuddhaRender()
         } catch (e) {
+          buddhaRenderPending = false
           console.warn('Error handling buddha-render button click:', e)
         }
       })
@@ -7948,16 +8314,14 @@ function initListeners() {
             if (typeof buddhaActive !== 'undefined' && buddhaActive) {
               stopAndClearBuddha()
               // Jump To 後に Buddhabrot が復元されないよう、保存データも消す
-              savedBuddhaImageData = null
-              savedBuddhaImageDataPromise = null
+              discardSavedBuddhaImageData()
             } else if (typeof buddhaPreservedDisplay !== 'undefined' && buddhaPreservedDisplay) {
               // Jump To が選ばれたので保持表示も消す
               stopAndClearBuddha()
             } else if (typeof savedBuddhaImageData !== 'undefined' && savedBuddhaImageData) {
               // 保存済みの Buddhabrot ビットマップがあれば消す
               stopAndClearBuddha()
-              savedBuddhaImageData = null
-              savedBuddhaImageDataPromise = null
+              discardSavedBuddhaImageData()
             }
 
             // まず params を展開して目標の center と zoom を取り出す
@@ -8105,23 +8469,20 @@ function initListeners() {
     const juliaResetBtn = document.getElementById('julia-reset')
     if (juliaToggleEl) {
       juliaToggleEl.addEventListener('change', (e) => {
-        juliaState.active = e.target.checked
+        const nextJuliaActive = e.target.checked
+        const stoppedBuddhabrotRendering = stopRenderingForJuliaToggleDuringBuddhabrot()
+        juliaState.active = nextJuliaActive
         const mandelbrotDiv = document.getElementById('mandelbrot')
         const juliaSection = document.getElementById('julia-section')
         const crosshair = document.getElementById('julia-crosshair')
 
-        // Buddhabrot が実行中または表示中なら停止して無効化する
-        if (buddhaActive || BuddhabrotState.preservedDisplay || BuddhabrotState.isViewEnabled()) {
-          stopAndClearBuddha()
-        }
-
-        // Buddhabrot UI 全体の表示を切り替える
+        // Buddhabrot UI は Julia 中も表示したままにする
         const buddhabrotSection = document.getElementById('buddhabrot-section')
 
         if (juliaState.active) {
           // Julia モードを有効化する
           mandelbrotDiv?.classList.add('julia-mode')
-          if (buddhabrotSection) buddhabrotSection.setAttribute('hidden', '')
+          if (buddhabrotSection) buddhabrotSection.removeAttribute('hidden')
           if (juliaSection) {
             juliaSection.removeAttribute('hidden')
             juliaSection.classList.add('visible')
@@ -8132,11 +8493,22 @@ function initListeners() {
           juliaToggleEl.closest('.d-flex.align-items-center')?.classList.remove('py-1')
 
           if (document.fullscreenElement) {
-            enterJuliaFullscreen()
+            enterJuliaFullscreen({ redraw: !stoppedBuddhabrotRendering })
+            if (stoppedBuddhabrotRendering) {
+              requestAnimationFrame(() => {
+                restoreFractalDisplayAfterClearingBuddha()
+                redrawJulia()
+              })
+            }
           } else {
             requestAnimationFrame(() => {
               resizeToCanvasSize()
-              redrawJulia()
+              if (stoppedBuddhabrotRendering) {
+                restoreFractalDisplayAfterClearingBuddha()
+                redrawJulia()
+              } else {
+                redrawJulia()
+              }
             })
           }
         } else {
@@ -8178,6 +8550,7 @@ function initListeners() {
           }
           requestAnimationFrame(() => {
             resizeToCanvasSize()
+            if (stoppedBuddhabrotRendering) restoreFractalDisplayAfterClearingBuddha()
           })
         }
       })
@@ -8186,6 +8559,7 @@ function initListeners() {
     if (juliaResetBtn) {
       juliaResetBtn.addEventListener('click', () => {
         if (!juliaState.renderer) return
+        invalidateJuliaBuddhabrotView({ clearVisible: true })
         const p = juliaState.renderer.precision
         juliaState.renderer.zoom = fxp.fromNumber(1, p)
         juliaState.renderer.center = [fxp.fromNumber(0, p), fxp.fromNumber(0, p)]
@@ -8676,7 +9050,7 @@ function initUI() {
  * Julia キャンバスをビューポート全体へ広げる。
  * Julia モードで全画面へ入るとき、または全画面中に Julia を有効化したときに使う。
  */
-function enterJuliaFullscreen() {
+function enterJuliaFullscreen({ redraw = true } = {}) {
   const mbWrap = document.getElementById('mandelbrot-canvas-wrap')
   const previewCol = document.getElementById('julia-mb-preview-col')
   const previewWrap = document.getElementById('julia-mb-preview-wrap')
@@ -8686,7 +9060,7 @@ function enterJuliaFullscreen() {
   if (previewWrap) previewWrap.removeAttribute('hidden')
   requestAnimationFrame(() => {
     resizeToCanvasSize()
-    redrawJulia()
+    if (redraw) redrawJulia()
   })
 }
 
