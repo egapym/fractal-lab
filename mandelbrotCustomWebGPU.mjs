@@ -239,6 +239,8 @@ export class MandelbrotCustomWebGPU {
       supersampling: task.supersampling,
       iterationFunction: this.iterationFunction,
       z0: task.z0 || [0, 0],
+      isJulia: task.fractalType === 'julia' || task.fractalType === 'julia-custom',
+      juliaC: [task.juliaRe ?? 0.0, task.juliaIm ?? 0.0],
       escapeRadius: task.escapeRadius !== undefined ? task.escapeRadius : 4.0,
     })
 
@@ -504,7 +506,9 @@ struct Spec {
   z0x: f32,
   z0y: f32,
   ssScale: u32,
-  _pad0: u32,
+  isJulia: u32,
+  juliaCr: f32,
+  juliaCi: f32,
 };
 
 @group(0) @binding(0) var<uniform> spec: Spec;
@@ -603,8 +607,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       let cr = spec.refr + spec.ddr0 + (f32(gid.x) + offset_x) * spec.ddr;
       let ci = spec.refi + spec.ddi0 + (f32(gid.y) + offset_y) * spec.ddi;
-      let c = vec2<f32>(cr, ci);
-      let z0 = vec2<f32>(spec.z0x, spec.z0y);
+	      let pixel = vec2<f32>(cr, ci);
+	      let c = select(pixel, vec2<f32>(spec.juliaCr, spec.juliaCi), spec.isJulia != 0u);
+	      let z0 = select(vec2<f32>(spec.z0x, spec.z0y), pixel, spec.isJulia != 0u);
 
       let result = iterate(z0, c);
       total_iter = total_iter + f32(result.iterVal);
@@ -629,8 +634,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // No supersampling
   let cr = spec.refr + spec.ddr0 + f32(gid.x) * spec.ddr;
   let ci = spec.refi + spec.ddi0 + f32(gid.y) * spec.ddi;
-  let c = vec2<f32>(cr, ci);
-  let z0 = vec2<f32>(spec.z0x, spec.z0y);
+	  let pixel = vec2<f32>(cr, ci);
+	  let c = select(pixel, vec2<f32>(spec.juliaCr, spec.juliaCi), spec.isJulia != 0u);
+	  let z0 = select(vec2<f32>(spec.z0x, spec.z0y), pixel, spec.isJulia != 0u);
 
   let result = iterate(z0, c);
   values[idx] = i32(result.iterVal);
@@ -700,7 +706,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     offset += 4
     specView.setUint32(offset, params.supersampling || 1, true)
     offset += 4
-    specView.setUint32(offset, 0, true) // padding
+    specView.setUint32(offset, params.isJulia ? 1 : 0, true)
+    offset += 4
+    specView.setFloat32(offset, params.juliaC?.[0] ?? 0.0, true)
+    offset += 4
+    specView.setFloat32(offset, params.juliaC?.[1] ?? 0.0, true)
 
     device.queue.writeBuffer(specBuffer, 0, specData)
 

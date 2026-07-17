@@ -202,7 +202,7 @@ export class OrbitTrapWebGPU {
     const trapSpec = task.trapSpec
 
     const iterationExpr =
-      task.fractalType === 'custom'
+      task.fractalType === 'custom' || task.fractalType === 'julia-custom'
         ? _customIterationToWGSL(task.iterationFunction)
         : 'vec2<f32>(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y)'
     const pipeline = await this._getPipeline(device, iterationExpr)
@@ -244,19 +244,22 @@ export class OrbitTrapWebGPU {
     const trapEscapeBailout = (task.escapeRadius ?? 4.0) ** 2
     const threshold = Number.isFinite(trapSpec.threshold) ? trapSpec.threshold : 1e20
     const [bgR, bgG, bgB] = _normalizeColor(trapSpec.bitmapBackgroundColor, DEFAULT_BACKGROUND)
-    const usesCustomIteration = task.fractalType === 'custom' && !_isDefaultMandelbrotIteration(task.iterationFunction)
+    const isJulia = task.fractalType === 'julia' || task.fractalType === 'julia-custom'
+    const usesCustomIteration =
+      (task.fractalType === 'custom' || task.fractalType === 'julia-custom') &&
+      !_isDefaultMandelbrotIteration(task.iterationFunction)
     const frameOffsetR = task.xOffset * ddr
     const frameOffsetI = task.yOffset * ddi
-    const z0r = task.z0?.[0] ?? task.z0Real ?? 0
-    const z0i = task.z0?.[1] ?? task.z0Imag ?? 0
+    const fixedValueR = isJulia ? (task.juliaRe ?? 0) : (task.z0?.[0] ?? task.z0Real ?? 0)
+    const fixedValueI = isJulia ? (task.juliaIm ?? 0) : (task.z0?.[1] ?? task.z0Imag ?? 0)
     const [, frameTopLeftRLo] = _splitF32(frameTopLeft[0])
     const [, frameTopLeftILo] = _splitF32(frameTopLeft[1])
     const [, frameOffsetRLo] = _splitF32(frameOffsetR)
     const [, frameOffsetILo] = _splitF32(frameOffsetI)
     const [, ddrLo] = _splitF32(ddr)
     const [, ddiLo] = _splitF32(ddi)
-    const [, z0rLo] = _splitF32(z0r)
-    const [, z0iLo] = _splitF32(z0i)
+    const [, fixedValueRLo] = _splitF32(fixedValueR)
+    const [, fixedValueILo] = _splitF32(fixedValueI)
 
     let offset = 0
     view.setUint32(offset, task.w, true)
@@ -279,8 +282,8 @@ export class OrbitTrapWebGPU {
 
     view.setFloat32(offset, ddr, true)
     view.setFloat32(offset + 4, ddi, true)
-    view.setFloat32(offset + 8, z0r, true)
-    view.setFloat32(offset + 12, z0i, true)
+    view.setFloat32(offset + 8, fixedValueR, true)
+    view.setFloat32(offset + 12, fixedValueI, true)
     offset += 16
 
     view.setFloat32(offset, trapEscapeBailout, true)
@@ -303,7 +306,7 @@ export class OrbitTrapWebGPU {
 
     view.setUint32(offset, shapeId, true)
     view.setUint32(offset + 4, colorPatternId, true)
-    view.setUint32(offset + 8, 0, true)
+    view.setUint32(offset + 8, isJulia ? 1 : 0, true)
     view.setUint32(offset + 12, 0, true)
     offset += 16
 
@@ -315,8 +318,8 @@ export class OrbitTrapWebGPU {
 
     view.setFloat32(offset, ddrLo, true)
     view.setFloat32(offset + 4, ddiLo, true)
-    view.setFloat32(offset + 8, z0rLo, true)
-    view.setFloat32(offset + 12, z0iLo, true)
+    view.setFloat32(offset + 8, fixedValueRLo, true)
+    view.setFloat32(offset + 12, fixedValueILo, true)
 
     return data
   }
@@ -1280,8 +1283,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         oy = (f32(sy) + 0.5) / f32(ssScale);
       }
 
-      let cDs = pixelToComplexDs(f32(gid.x) + ox, f32(gid.y) + oy);
-      let z0Ds = z0FromSpecDs();
+      let pixelDs = pixelToComplexDs(f32(gid.x) + ox, f32(gid.y) + oy);
+      let fixedDs = z0FromSpecDs();
+      var cDs = pixelDs;
+      var z0Ds = fixedDs;
+      if (spec.extra.z != 0u) {
+        cDs = fixedDs;
+        z0Ds = pixelDs;
+      }
       let c = ds2ToVec2(cDs);
       let z0 = ds2ToVec2(z0Ds);
 

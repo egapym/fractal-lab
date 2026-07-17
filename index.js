@@ -1502,10 +1502,14 @@ class JuliaRenderer {
     this.smooth = true
     this.supersampling = 0
     this.escapeRadius = 4.0
+    this.useGpu = true
     this.precision = 64
     // フラクタル種別と反復関数もメイン側に合わせる
     this.fractalType = 'julia'
     this.iterationFunction = 'z*z + c'
+    this._skipGpuOnce = false
+    this._skipOrbitTrapGpuOnce = false
+    this._lastOrbitTrapGpuRenderKey = null
 
     // 固定ビュー: center (0,0), zoom 1
     // 他の FxP 値と同じ scale を使い、乗除算の不整合を避ける
@@ -1528,6 +1532,8 @@ class JuliaRenderer {
         ),
       )
     }
+    this.juliaGpu = new mcgpu.MandelbrotCustomWebGPU(this, new WorkerContext(), (error) => this.gpuErrorCallback(error))
+    this.orbitTrapGpu = new OrbitTrapWebGPU((error) => this.gpuErrorCallback(error))
     this.syncSettings()
   }
 
@@ -1542,6 +1548,15 @@ class JuliaRenderer {
     )
   }
 
+  handleWorkerError(errorMessage) {
+    console.error('[Julia Custom Function Error]', errorMessage)
+    setIterationFunctionLabelError(true)
+  }
+
+  gpuErrorCallback(message) {
+    console.log(`Julia GPU error: ${message}`)
+  }
+
   /**
    * 再計算せずにパレットだけ更新し、既存 offscreen を再描画する。
    * Mandelbrot 側の initPallete(true) 相当。
@@ -1551,13 +1566,23 @@ class JuliaRenderer {
     if (!this.offscreens) return
     // OTパレットへの切り替え時や異なるOTパレット間の切り替え時は再計算が必要。
     // 非OTパレットの場合は trapSpec=null なので再計算不要。
-    const newTrapSpec = this.paletteComponent?.palette?.trapSpec ?? null
+    const paletteObj = this.paletteComponent?.palette
+    const newTrapSpec = paletteObj?.trapSpec ?? null
     const newTrapKey = _trapSpecKey(newTrapSpec)
-    if (newTrapSpec !== null && newTrapKey !== this._lastTrapSpecKey) {
+    const useOrbitTrapGpu = this._canUseOrbitTrapGpu()
+    const newOrbitTrapGpuRenderKey = useOrbitTrapGpu ? _orbitTrapGpuRenderKey(paletteObj) : null
+    if (
+      newTrapSpec !== null &&
+      (newTrapKey !== this._lastTrapSpecKey ||
+        (useOrbitTrapGpu && newOrbitTrapGpuRenderKey !== this._lastOrbitTrapGpuRenderKey))
+    ) {
       this._lastTrapSpecKey = newTrapKey
+      this._lastOrbitTrapGpuRenderKey = newOrbitTrapGpuRenderKey
       this.render()
       return
     }
+    if (useOrbitTrapGpu) return
+    this._lastOrbitTrapGpuRenderKey = null
     const lastScreenNr = this.jobLevel < 1 ? this.offscreens.length - 1 : this.jobLevel - 1
     for (let i = 0; i <= lastScreenNr; i++) {
       this.offscreens[i]?.render(this.palette, this.max_iter, this.smooth, this.paletteComponent.palette)
@@ -1620,7 +1645,36 @@ class JuliaRenderer {
     this.jobToken = URL.createObjectURL(new Blob())
   }
 
+  _canUseGpu(options = {}) {
+    if (this._skipGpuOnce) {
+      if (options.consumeSkip) this._skipGpuOnce = false
+      return false
+    }
+    return this.useGpu && !this.paletteComponent?.palette?.requiresCpu && this.juliaGpu?.available
+  }
+
+  _canUseOrbitTrapGpu(options = {}) {
+    if (this._skipOrbitTrapGpuOnce) {
+      if (options.consumeSkip) this._skipOrbitTrapGpuOnce = false
+      return false
+    }
+    const paletteObj = this.paletteComponent?.palette
+    const trapSpec = paletteObj?.trapSpec
+    const colorPatternId = _orbitTrapColorPatternId(paletteObj)
+    if (trapSpec?.mode === 'tia') return false
+    return this.useGpu && !!trapSpec && colorPatternId != null && !!trapSpec?.shape && this.orbitTrapGpu?.available
+  }
+
   startNextJob() {
+    if (this._canUseOrbitTrapGpu({ consumeSkip: true })) {
+      this.startNextOrbitTrapGpuJob()
+      return
+    }
+    if (this._canUseGpu({ consumeSkip: true })) {
+      this.startNextGpuJob()
+      return
+    }
+
     // CPU 描画が GPU と一致するよう、ユーザー指定の z0 を読む
     const z0Real = document.getElementById('z0-real') ? parseFloat(document.getElementById('z0-real').value) || 0 : 0
     const z0Imag = document.getElementById('z0-imag') ? parseFloat(document.getElementById('z0-imag').value) || 0 : 0
@@ -1705,6 +1759,108 @@ class JuliaRenderer {
     for (const worker of this.workers) worker.pickTask()
   }
 
+  startNextOrbitTrapGpuJob() {
+    this._revokeJobToken()
+    this._createJobToken()
+
+    const screen = this.offscreens[this.offscreens.length - 1]
+    const w = screen.buffer.width
+    const h = screen.buffer.height
+    this.jobLevel = this.offscreens.length - 1
+
+    if (this.progress) this.progress.start(w * h)
+    const frameTopLeft = this.canvas2complex(0, 0)
+    const roundup = (value) => Math.ceil(value / screen.scale) * screen.scale
+    const frameBottomRight = this.canvas2complex(roundup(this.width), roundup(this.height))
+    const z0Real = document.getElementById('z0-real') ? parseFloat(document.getElementById('z0-real').value) || 0 : 0
+    const z0Imag = document.getElementById('z0-imag') ? parseFloat(document.getElementById('z0-imag').value) || 0 : 0
+    const trapSpec = this.paletteComponent?.palette?.trapSpec ?? null
+    const colorPatternId = _orbitTrapColorPatternId(this.paletteComponent?.palette)
+    const task = {
+      type: 'task',
+      jobId: this.jobId,
+      jobToken: this.jobToken,
+      pixelSize: screen.scale,
+      taskNumber: 0,
+      xOffset: 0,
+      yOffset: 0,
+      w,
+      h,
+      frameWidth: w,
+      frameHeight: h,
+      frameTopLeft,
+      frameBottomRight,
+      paramHash: `julia-orbit-gpu-${this.max_iter}-${this.smooth}-${this.supersampling}-${this.fractalType}-${this.iterationFunction}-${this.juliaCRe}-${this.juliaCIm}-${this.escapeRadius}-${z0Real}-${z0Imag}-${_trapSpecKey(trapSpec)}-${colorPatternId ?? ''}`,
+      resetCaches: false,
+      skipTopLeft: false,
+      smooth: this.smooth,
+      supersampling: this.supersampling,
+      maxIter: this.max_iter,
+      precision: this.precision,
+      requiredPrecision: 64,
+      fractalType: this.fractalType,
+      iterationFunction: this.iterationFunction,
+      z0: [z0Real, z0Imag],
+      z0Real,
+      z0Imag,
+      juliaRe: this.juliaCRe,
+      juliaIm: this.juliaCIm,
+      escapeRadius: this.escapeRadius,
+      trapSpec,
+      colorPatternId,
+      onUpdate: (answer) => this.onGpuUpdate(answer),
+    }
+    this.orbitTrapGpu.process(task)
+  }
+
+  startNextGpuJob() {
+    this._revokeJobToken()
+    this._createJobToken()
+
+    const screen = this.offscreens[this.offscreens.length - 1]
+    const w = screen.buffer.width
+    const h = screen.buffer.height
+    this.jobLevel = this.offscreens.length - 1
+
+    if (this.progress) this.progress.start(w * h)
+
+    const frameTopLeft = this.canvas2complex(0, 0)
+    const roundup = (v) => Math.ceil(v / screen.scale) * screen.scale
+    const frameBottomRight = this.canvas2complex(roundup(this.width), roundup(this.height))
+    const z0Real = document.getElementById('z0-real') ? parseFloat(document.getElementById('z0-real').value) || 0 : 0
+    const z0Imag = document.getElementById('z0-imag') ? parseFloat(document.getElementById('z0-imag').value) || 0 : 0
+    const task = {
+      type: 'task',
+      jobId: this.jobId,
+      jobToken: this.jobToken,
+      pixelSize: screen.scale,
+      taskNumber: 0,
+      xOffset: 0,
+      yOffset: 0,
+      w,
+      h,
+      frameWidth: w,
+      frameHeight: h,
+      frameTopLeft,
+      frameBottomRight,
+      paramHash: `julia-gpu-${this.max_iter}-${this.smooth}-${this.supersampling}-${this.fractalType}-${this.iterationFunction}-${this.juliaCRe}-${this.juliaCIm}-${this.escapeRadius}-${z0Real}-${z0Imag}`,
+      resetCaches: false,
+      skipTopLeft: false,
+      smooth: this.smooth,
+      supersampling: this.supersampling,
+      maxIter: this.max_iter,
+      precision: this.precision,
+      requiredPrecision: 64,
+      fractalType: this.fractalType,
+      juliaRe: this.juliaCRe,
+      juliaIm: this.juliaCIm,
+      iterationFunction: this.iterationFunction,
+      z0: [z0Real, z0Imag],
+      escapeRadius: this.escapeRadius,
+    }
+    this.juliaGpu.process(task)
+  }
+
   onResult(answer) {
     const task = answer.task
     if (task.jobToken !== this.jobToken) return
@@ -1736,6 +1892,48 @@ class JuliaRenderer {
       offscreen.render(this.palette, this.max_iter, this.smooth, this.paletteComponent.palette)
       this.startNextJob()
     }
+  }
+
+  onGpuUpdate(answer) {
+    if (answer.jobToken !== this.jobToken) return
+
+    if (answer.error) {
+      console.error('Julia GPU rendering error:', answer.error)
+      setIterationFunctionLabelError(true)
+      if (this.progress) this.progress.finish()
+      if (answer.fallbackToCpu) this._skipOrbitTrapGpuOnce = true
+      else this._skipGpuOnce = true
+      this.render()
+      return
+    }
+
+    if (!iterationFunctionHasError) setIterationFunctionLabelError(false)
+
+    const offscreen = this.offscreens[this.offscreens.length - 1]
+    if (!offscreen) return
+
+    if (answer.rgba) {
+      if (this.progress) {
+        if (answer.isFinished) this.progress.finish()
+        else this.progress.update(Math.round((this.progress.tasks - this.progress.done) / 2))
+      }
+      offscreen.renderRgba(answer.rgba)
+      return
+    }
+
+    offscreen.values.set(answer.values)
+    if (this.smooth && answer.smooth) offscreen.smooth.set(answer.smooth)
+    if (answer.signs) offscreen.signs.set(answer.signs)
+    if (answer.zreal) offscreen.zreal.set(answer.zreal)
+    if (answer.zimag) offscreen.zimag.set(answer.zimag)
+    if (answer.otData) offscreen.otData.set(answer.otData)
+
+    if (this.progress) {
+      if (answer.isFinished) this.progress.finish()
+      else this.progress.update(Math.round((this.progress.tasks - this.progress.done) / 2))
+    }
+
+    offscreen.render(this.palette, this.max_iter, this.smooth, this.paletteComponent.palette)
   }
 
   async render() {
@@ -4309,6 +4507,7 @@ function redrawJulia() {
   renderer.smooth = fractal.smooth
   renderer.supersampling = fractal.supersampling
   renderer.escapeRadius = fractal.escapeRadius !== undefined ? fractal.escapeRadius : 4.0
+  renderer.useGpu = fractal.useGpu
   // フラクタル種別を同期する。カスタム関数なら julia-custom、通常は julia。
   if (fractal.fractalType === 'custom') {
     renderer.fractalType = 'julia-custom'
