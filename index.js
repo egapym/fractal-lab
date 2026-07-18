@@ -313,6 +313,7 @@ const MAX_PIXEL_SIZE = 16
 const MIN_ZOOM = fxp.fromNumber(0.1) // スクロールで 0.1（1/10）まで縮小できる
 const NON_MANDELBROT_CPU_MAX_ZOOM = fxp.fromNumber(1.0e14)
 const NON_MANDELBROT_GPU_MAX_ZOOM = fxp.fromNumber(1.0e5)
+const ORBIT_TRAP_CPU_MAX_ZOOM = fxp.fromNumber(2.2e13)
 
 // アニメーションと時間まわりの定数
 const ANIMATION_CONSTANTS = {
@@ -359,15 +360,28 @@ function clampNumber(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }
 
-function getMainZoomLimitForState(fractalType, renderingWithGpu, scale = 60) {
-  if (!fractalType || fractalType === 'mandelbrot') return null
-  const limit = renderingWithGpu ? NON_MANDELBROT_GPU_MAX_ZOOM : NON_MANDELBROT_CPU_MAX_ZOOM
+function isOrbitTrapPalette(paletteObj) {
+  return !!paletteObj?.trapSpec
+}
+
+function getZoomClampOptionsForPalette(paletteObj, options = {}) {
+  const forceLimit = isOrbitTrapPalette(paletteObj)
+  return {
+    forceLimit,
+    cpuMaxZoom: forceLimit ? ORBIT_TRAP_CPU_MAX_ZOOM : null,
+    includeMinimum: !!options.includeMinimum || forceLimit,
+  }
+}
+
+function getMainZoomLimitForState(fractalType, renderingWithGpu, scale = 60, options = {}) {
+  if (!options.forceLimit && (!fractalType || fractalType === 'mandelbrot')) return null
+  const limit = renderingWithGpu ? NON_MANDELBROT_GPU_MAX_ZOOM : options.cpuMaxZoom || NON_MANDELBROT_CPU_MAX_ZOOM
   return limit.withScale(scale)
 }
 
 function clampZoomForState(zoom, fractalType, renderingWithGpu, options = {}) {
   const scale = Number.isFinite(zoom?.scale) ? zoom.scale : 60
-  const limit = getMainZoomLimitForState(fractalType, renderingWithGpu, scale)
+  const limit = getMainZoomLimitForState(fractalType, renderingWithGpu, scale, options)
   let normalizedZoom = zoom.withScale(scale)
 
   if (options.includeMinimum) {
@@ -817,7 +831,12 @@ class Mandelbrot {
 
   setZoom(zoom) {
     const renderingWithGpu = this._willUseGpuForCurrentRender?.() ?? this.useGpu
-    this.zoom = clampZoomForState(zoom, this.fractalType, renderingWithGpu)
+    this.zoom = clampZoomForState(
+      zoom,
+      this.fractalType,
+      renderingWithGpu,
+      getZoomClampOptionsForPalette(this.paletteComponent?.palette),
+    )
     this.viewRevision++
     this._updatePrecision()
   }
@@ -833,7 +852,12 @@ class Mandelbrot {
   }
 
   applyZoomLimitForRenderMode(renderingWithGpu) {
-    const clampedZoom = clampZoomForState(this.zoom, this.fractalType, renderingWithGpu)
+    const clampedZoom = clampZoomForState(
+      this.zoom,
+      this.fractalType,
+      renderingWithGpu,
+      getZoomClampOptionsForPalette(this.paletteComponent?.palette),
+    )
     const currentZoom = this.zoom.withScale(clampedZoom.scale)
     if (currentZoom.bigInt === clampedZoom.bigInt) return false
 
@@ -1666,7 +1690,12 @@ class JuliaRenderer {
 
   setZoom(zoom) {
     const renderingWithGpu = this._willUseGpuForCurrentRender?.() ?? this.useGpu
-    this.zoom = clampZoomForState(zoom, this.fractalType, renderingWithGpu, { includeMinimum: true })
+    this.zoom = clampZoomForState(
+      zoom,
+      this.fractalType,
+      renderingWithGpu,
+      getZoomClampOptionsForPalette(this.paletteComponent?.palette, { includeMinimum: true }),
+    )
   }
 
   _willUseGpuForCurrentRender() {
@@ -1674,7 +1703,12 @@ class JuliaRenderer {
   }
 
   applyZoomLimitForRenderMode(renderingWithGpu) {
-    const clampedZoom = clampZoomForState(this.zoom, this.fractalType, renderingWithGpu, { includeMinimum: true })
+    const clampedZoom = clampZoomForState(
+      this.zoom,
+      this.fractalType,
+      renderingWithGpu,
+      getZoomClampOptionsForPalette(this.paletteComponent?.palette, { includeMinimum: true }),
+    )
     const currentZoom = this.zoom.withScale(clampedZoom.scale)
     if (currentZoom.bigInt === clampedZoom.bigInt) return false
 
@@ -5433,7 +5467,12 @@ function handleJuliaScroll(evt) {
   const bigFactor = fxp.fromNumber(factor, p)
   const zoomFx = renderer.zoom.withScale(p)
   const renderingWithGpu = renderer._willUseGpuForCurrentRender?.() ?? renderer.useGpu
-  const upperBound = getMainZoomLimitForState(renderer.fractalType, renderingWithGpu, p)
+  const upperBound = getMainZoomLimitForState(
+    renderer.fractalType,
+    renderingWithGpu,
+    p,
+    getZoomClampOptionsForPalette(renderer.paletteComponent?.palette),
+  )
   const rawZoom = zoomFx.multiply(bigFactor).max(lowerBound)
   const newZoom = upperBound ? rawZoom.min(upperBound) : rawZoom
   const zoomChanged = newZoom.bigInt !== zoomFx.bigInt
@@ -5660,7 +5699,12 @@ function applyCoordinates() {
     // アニメーション用の目標値を準備する
     const targetCenter = [x, y]
     const targetRenderingWithGpu = fractal._willUseGpuForCurrentRender?.() ?? fractal.useGpu
-    const targetZoom = clampZoomForState(zoom, fractal.fractalType, targetRenderingWithGpu)
+    const targetZoom = clampZoomForState(
+      zoom,
+      fractal.fractalType,
+      targetRenderingWithGpu,
+      getZoomClampOptionsForPalette(fractal.paletteComponent?.palette),
+    )
     const zoomWasClamped = zoom.withScale(targetZoom.scale).bigInt !== targetZoom.bigInt
 
     // Buddhabrot 実行中なら停止して消去し、パンやズームを再び有効にする
@@ -6854,7 +6898,12 @@ function _zoomViewAroundCanvasPoint(center, zoom, factor, x, y, precision = frac
   const bigFactor = fxp.fromNumber(factor, precision)
   const rawZoom = zoomFx.multiply(bigFactor).max(lowerBound)
   const renderingWithGpu = fractal._willUseGpuForCurrentRender?.() ?? fractal.useGpu
-  const upperBound = getMainZoomLimitForState(fractal.fractalType, renderingWithGpu, precision)
+  const upperBound = getMainZoomLimitForState(
+    fractal.fractalType,
+    renderingWithGpu,
+    precision,
+    getZoomClampOptionsForPalette(fractal.paletteComponent?.palette),
+  )
   const newZoom = upperBound ? rawZoom.min(upperBound) : rawZoom
   const zoomChanged = newZoom.bigInt !== zoomFx.bigInt
   const centerRe = center[0].withScale(precision)
@@ -7478,7 +7527,12 @@ function initListeners() {
           const bigFactor = fxp.fromNumber(factor, p)
           const zoomFx = renderer.zoom.withScale(p)
           const renderingWithGpu = renderer._willUseGpuForCurrentRender?.() ?? renderer.useGpu
-          const upperBound = getMainZoomLimitForState(renderer.fractalType, renderingWithGpu, p)
+          const upperBound = getMainZoomLimitForState(
+            renderer.fractalType,
+            renderingWithGpu,
+            p,
+            getZoomClampOptionsForPalette(renderer.paletteComponent?.palette),
+          )
           const rawZoom = zoomFx.multiply(bigFactor).max(lowerBound)
           const newZoom = upperBound ? rawZoom.min(upperBound) : rawZoom
           const zoomChanged = newZoom.bigInt !== zoomFx.bigInt
