@@ -311,6 +311,8 @@ const DEFAULT_WORKER_COUNT = navigator.hardwareConcurrency * 4 || 4
 const MIN_PIXEL_SIZE = 1
 const MAX_PIXEL_SIZE = 16
 const MIN_ZOOM = fxp.fromNumber(0.1) // スクロールで 0.1（1/10）まで縮小できる
+const NON_MANDELBROT_CPU_MAX_ZOOM = fxp.fromNumber(1.0e14)
+const NON_MANDELBROT_GPU_MAX_ZOOM = fxp.fromNumber(1.0e5)
 
 // アニメーションと時間まわりの定数
 const ANIMATION_CONSTANTS = {
@@ -355,6 +357,23 @@ const ORBIT_TRAP_BITMAP_URL_QUERY_KEY = 'orbitTrapBitmapUrl'
 
 function clampNumber(value, min, max) {
   return Math.max(min, Math.min(max, value))
+}
+
+function getMainZoomLimitForState(fractalType, renderingWithGpu, scale = 60) {
+  if (!fractalType || fractalType === 'mandelbrot') return null
+  const limit = renderingWithGpu ? NON_MANDELBROT_GPU_MAX_ZOOM : NON_MANDELBROT_CPU_MAX_ZOOM
+  return limit.withScale(scale)
+}
+
+function clampZoomForState(zoom, fractalType, renderingWithGpu, options = {}) {
+  const scale = Number.isFinite(zoom?.scale) ? zoom.scale : 60
+  const limit = getMainZoomLimitForState(fractalType, renderingWithGpu, scale)
+  let normalizedZoom = zoom.withScale(scale)
+
+  if (options.includeMinimum) {
+    normalizedZoom = normalizedZoom.max(MIN_ZOOM.withScale(scale))
+  }
+  return limit && normalizedZoom.bigInt > limit.bigInt ? limit : normalizedZoom
 }
 
 function getBooleanQueryParam(key, defaultValue = false) {
@@ -797,9 +816,35 @@ class Mandelbrot {
   }
 
   setZoom(zoom) {
-    this.zoom = zoom
+    const renderingWithGpu = this._willUseGpuForCurrentRender?.() ?? this.useGpu
+    this.zoom = clampZoomForState(zoom, this.fractalType, renderingWithGpu)
     this.viewRevision++
     this._updatePrecision()
+  }
+
+  _willUseGpuForCurrentRender() {
+    return (
+      this.useGpu &&
+      (this._canUseOrbitTrapGpu?.() ||
+        (!this.paletteComponent?.palette?.requiresCpu &&
+          ((this.fractalType === 'mandelbrot' && this.mandelbrotGpu?.available) ||
+            (this.fractalType === 'custom' && this.mandelbrotCustomGpu?.available))))
+    )
+  }
+
+  applyZoomLimitForRenderMode(renderingWithGpu) {
+    const clampedZoom = clampZoomForState(this.zoom, this.fractalType, renderingWithGpu)
+    const currentZoom = this.zoom.withScale(clampedZoom.scale)
+    if (currentZoom.bigInt === clampedZoom.bigInt) return false
+
+    this.zoom = clampedZoom
+    this.viewRevision++
+    this._updatePrecision()
+    return true
+  }
+
+  applyZoomLimitForConfiguredMode() {
+    return this.applyZoomLimitForRenderMode(this._willUseGpuForCurrentRender())
   }
 
   _updatePrecision() {
@@ -1427,6 +1472,10 @@ class Mandelbrot {
   }
 
   async render(resetCaches) {
+    const zoomClamped = this.applyZoomLimitForRenderMode(this._willUseGpuForCurrentRender())
+    if (zoomClamped && this === fractal) {
+      updateCoordinateInputs()
+    }
     this.taskqueue.length = 0
     this.jobId++
     this.jobLevel = -1
@@ -1613,6 +1662,28 @@ class JuliaRenderer {
   setJuliaC(re, im) {
     this.juliaCRe = re
     this.juliaCIm = im
+  }
+
+  setZoom(zoom) {
+    const renderingWithGpu = this._willUseGpuForCurrentRender?.() ?? this.useGpu
+    this.zoom = clampZoomForState(zoom, this.fractalType, renderingWithGpu, { includeMinimum: true })
+  }
+
+  _willUseGpuForCurrentRender() {
+    return this.useGpu && (this._canUseOrbitTrapGpu?.() || this._canUseGpu?.())
+  }
+
+  applyZoomLimitForRenderMode(renderingWithGpu) {
+    const clampedZoom = clampZoomForState(this.zoom, this.fractalType, renderingWithGpu, { includeMinimum: true })
+    const currentZoom = this.zoom.withScale(clampedZoom.scale)
+    if (currentZoom.bigInt === clampedZoom.bigInt) return false
+
+    this.zoom = clampedZoom
+    return true
+  }
+
+  applyZoomLimitForConfiguredMode() {
+    return this.applyZoomLimitForRenderMode(this._willUseGpuForCurrentRender())
   }
 
   /** キャンバス座標を複素数 (FxP) へ変換する */
@@ -1945,6 +2016,7 @@ class JuliaRenderer {
   async render() {
     if (!this.canvas.width || !this.canvas.height) return
     if (!this.offscreens || this.offscreens.length === 0) this.initOffscreens()
+    this.applyZoomLimitForRenderMode(this._willUseGpuForCurrentRender())
     // 実行中ジョブがあれば中断する
     this._revokeJobToken()
     this.taskqueue.length = 0
@@ -4992,13 +5064,7 @@ const GPU_INTERACTIVE_REDRAW_INTERVAL_MS = 50
 // let dragged = false
 
 function isMainRenderGpuPath() {
-  return (
-    fractal.useGpu &&
-    (fractal._canUseOrbitTrapGpu?.() ||
-      (!fractal.paletteComponent?.palette?.requiresCpu &&
-        ((fractal.fractalType === 'mandelbrot' && fractal.mandelbrotGpu?.available) ||
-          (fractal.fractalType === 'custom' && fractal.mandelbrotCustomGpu?.available))))
-  )
+  return !!fractal?._willUseGpuForCurrentRender?.()
 }
 
 function cancelActiveMainRender() {
@@ -5111,6 +5177,18 @@ function resetPendingInteractiveTransform() {
   pendingInteractiveTransformTy = 0
 }
 
+function clearPendingInteractiveRedrawState() {
+  if (gpuInteractiveRedrawTimer != null) {
+    clearTimeout(gpuInteractiveRedrawTimer)
+    gpuInteractiveRedrawTimer = null
+  }
+  gpuInteractiveRedrawPending = false
+  pendingInteractivePinchView = null
+  pendingInteractivePanDx = 0
+  pendingInteractivePanDy = 0
+  resetPendingInteractiveTransform()
+}
+
 function reapplyPendingInteractiveTransform() {
   if (!hasPendingInteractiveTransform()) return
   if (tempCanvas.width !== canvasElement.width) tempCanvas.width = canvasElement.width
@@ -5170,6 +5248,10 @@ function commitPendingInteractivePan() {
 }
 
 function startGpuInteractiveRedrawNow() {
+  if (!isMainRenderGpuPath()) {
+    clearPendingInteractiveRedrawState()
+    return
+  }
   if (pendingInteractivePinchView) {
     fractal.setZoom(pendingInteractivePinchView.zoom)
     fractal.setCenter(pendingInteractivePinchView.center)
@@ -5200,6 +5282,10 @@ function scheduleGpuInteractiveRedraw() {
 }
 
 function flushGpuInteractiveRedraw() {
+  if (!isMainRenderGpuPath()) {
+    clearPendingInteractiveRedrawState()
+    return
+  }
   if (gpuInteractiveRedrawTimer != null) {
     clearTimeout(gpuInteractiveRedrawTimer)
     gpuInteractiveRedrawTimer = null
@@ -5259,15 +5345,17 @@ function zoomWithFactor(factor, cooldown, options = {}) {
       lastY,
       fractal.precision,
     )
+    if (!zoomedPendingView.zoomChanged) return
     pendingInteractivePinchView = {
       center: zoomedPendingView.center,
       zoom: zoomedPendingView.zoom,
     }
-    trackPendingInteractiveScaleTransform(factor, lastX, lastY)
-    scaleCanvas(factor, lastX, lastY)
+    trackPendingInteractiveScaleTransform(zoomedPendingView.appliedFactor, lastX, lastY)
+    scaleCanvas(zoomedPendingView.appliedFactor, lastX, lastY)
     scheduleGpuInteractiveRedraw()
   } else {
     const zoomedView = _zoomViewAroundCanvasPoint(fractal.center, fractal.zoom, factor, lastX, lastY, fractal.precision)
+    if (!zoomedView.zoomChanged) return
 
     // 新しい中心座標とズームを反映する
     fractal.setCenter(zoomedView.center)
@@ -5277,7 +5365,7 @@ function zoomWithFactor(factor, cooldown, options = {}) {
     } else if (detailHoverState) {
       _renderDetailIndicator()
     }
-    scaleCanvas(factor, lastX, lastY)
+    scaleCanvas(zoomedView.appliedFactor, lastX, lastY)
     redraw(false, cooldown)
   }
   _refreshPinnedOrbits()
@@ -5343,14 +5431,24 @@ function handleJuliaScroll(evt) {
 
   // ズーム倍率を適用する
   const bigFactor = fxp.fromNumber(factor, p)
-  const newZoom = renderer.zoom.withScale(p).multiply(bigFactor).max(lowerBound)
+  const zoomFx = renderer.zoom.withScale(p)
+  const renderingWithGpu = renderer._willUseGpuForCurrentRender?.() ?? renderer.useGpu
+  const upperBound = getMainZoomLimitForState(renderer.fractalType, renderingWithGpu, p)
+  const rawZoom = zoomFx.multiply(bigFactor).max(lowerBound)
+  const newZoom = upperBound ? rawZoom.min(upperBound) : rawZoom
+  const zoomChanged = newZoom.bigInt !== zoomFx.bigInt
+  if (!zoomChanged) {
+    evt.preventDefault()
+    return
+  }
 
   // カーソル下の点が動かないよう中心を調整する
-  const invFactor = fxp.fromNumber(1.0 / factor, p)
+  const appliedFactor = newZoom.divide(zoomFx).toNumber()
+  const invFactor = fxp.fromNumber(1.0 / appliedFactor, p)
   const offsetX = ptr[0].subtract(renderer.center[0].withScale(p)).multiply(invFactor)
   const offsetY = ptr[1].subtract(renderer.center[1].withScale(p)).multiply(invFactor)
   renderer.center = [ptr[0].subtract(offsetX), ptr[1].subtract(offsetY)]
-  renderer.zoom = newZoom
+  renderer.setZoom(newZoom)
   if (detailPinnedState) {
     clearPinnedDetailPopup()
   } else if (detailHoverState) {
@@ -5561,7 +5659,9 @@ function applyCoordinates() {
 
     // アニメーション用の目標値を準備する
     const targetCenter = [x, y]
-    const targetZoom = zoom
+    const targetRenderingWithGpu = fractal._willUseGpuForCurrentRender?.() ?? fractal.useGpu
+    const targetZoom = clampZoomForState(zoom, fractal.fractalType, targetRenderingWithGpu)
+    const zoomWasClamped = zoom.withScale(targetZoom.scale).bigInt !== targetZoom.bigInt
 
     // Buddhabrot 実行中なら停止して消去し、パンやズームを再び有効にする
     try {
@@ -5586,7 +5686,11 @@ function applyCoordinates() {
     // fractal.fractalType と関連 UI を維持する。
 
     // 再描画中に表示が丸まらないよう入力値を保持する
-    const preservedInputs = { x: xStr, y: yStr, zoom: zoomStr }
+    const preservedInputs = {
+      x: xStr,
+      y: yStr,
+      zoom: zoomWasClamped ? formatZoomValueForInput(targetZoom) : zoomStr,
+    }
 
     // いったん初期位置へ戻してから目標位置へアニメーションする
     _clearPinnedOrbits()
@@ -5616,7 +5720,10 @@ function applyCoordinates() {
     setTimeout(() => {
       document.getElementById('coordX').value = preservedInputs.x
       document.getElementById('coordY').value = preservedInputs.y
-      document.getElementById('coordZoom').value = preservedInputs.zoom
+      const appliedTargetZoom = fractal.zoom.withScale(targetZoom.scale).bigInt === targetZoom.bigInt
+      document.getElementById('coordZoom').value = appliedTargetZoom
+        ? preservedInputs.zoom
+        : formatZoomValueForInput(fractal.zoom)
     }, 0)
   } catch (error) {
     console.error('Error applying coordinates:', error)
@@ -6738,23 +6845,32 @@ function _zoomViewAroundCanvasPoint(center, zoom, factor, x, y, precision = frac
     return {
       center: [center[0].withScale(precision), center[1].withScale(precision)],
       zoom: zoomFx,
+      appliedFactor: 1,
+      zoomChanged: false,
     }
   }
 
   const ptr = _canvas2complexForView(x, y, center, zoomFx, precision)
   const bigFactor = fxp.fromNumber(factor, precision)
-  const newZoom = zoomFx.multiply(bigFactor).max(lowerBound)
+  const rawZoom = zoomFx.multiply(bigFactor).max(lowerBound)
+  const renderingWithGpu = fractal._willUseGpuForCurrentRender?.() ?? fractal.useGpu
+  const upperBound = getMainZoomLimitForState(fractal.fractalType, renderingWithGpu, precision)
+  const newZoom = upperBound ? rawZoom.min(upperBound) : rawZoom
+  const zoomChanged = newZoom.bigInt !== zoomFx.bigInt
   const centerRe = center[0].withScale(precision)
   const centerIm = center[1].withScale(precision)
   const offsetX = ptr[0].subtract(centerRe)
   const offsetY = ptr[1].subtract(centerIm)
-  const invFactor = fxp.fromNumber(1.0 / factor, precision)
+  const appliedFactor = zoomChanged ? newZoom.divide(zoomFx).toNumber() : 1
+  const invFactor = fxp.fromNumber(1.0 / appliedFactor, precision)
   const newOffsetX = offsetX.multiply(invFactor)
   const newOffsetY = offsetY.multiply(invFactor)
 
   return {
     center: [ptr[0].subtract(newOffsetX), ptr[1].subtract(newOffsetY)],
     zoom: newZoom,
+    appliedFactor,
+    zoomChanged,
   }
 }
 
@@ -7350,8 +7466,7 @@ function initListeners() {
           const [newCenterX, newCenterY] = _juliaCanvasCoordsFromClient(newTouchCenter[0], newTouchCenter[1])
           const dx = newCenterX - lastCenterX
           const dy = newCenterY - lastCenterY
-          if (factor !== 1 || dx !== 0 || dy !== 0) invalidateJuliaBuddhabrotView()
-          if (detailPinnedState) clearPinnedDetailPopup()
+          const hasPan = dx !== 0 || dy !== 0
           const w_fx = fxp.fromNumber(renderer.width, p)
           const scale_fx = renderer.zoom.withScale(p).multiply(w_fx).divide(fxp.fromNumber(4, p))
           const dxFx = fxp.fromNumber(-dx, p).divide(scale_fx)
@@ -7361,12 +7476,25 @@ function initListeners() {
           const ptr = renderer.canvas2complex(newCenterX, newCenterY)
           const lowerBound = MIN_ZOOM.withScale(p)
           const bigFactor = fxp.fromNumber(factor, p)
-          const newZoom = renderer.zoom.withScale(p).multiply(bigFactor).max(lowerBound)
-          const invFactor = fxp.fromNumber(1.0 / factor, p)
+          const zoomFx = renderer.zoom.withScale(p)
+          const renderingWithGpu = renderer._willUseGpuForCurrentRender?.() ?? renderer.useGpu
+          const upperBound = getMainZoomLimitForState(renderer.fractalType, renderingWithGpu, p)
+          const rawZoom = zoomFx.multiply(bigFactor).max(lowerBound)
+          const newZoom = upperBound ? rawZoom.min(upperBound) : rawZoom
+          const zoomChanged = newZoom.bigInt !== zoomFx.bigInt
+          if (!zoomChanged && !hasPan) {
+            juliaLastTouchDistance = newTouchDistance
+            juliaLastTouchCenter = newTouchCenter
+            return
+          }
+          invalidateJuliaBuddhabrotView()
+          if (detailPinnedState) clearPinnedDetailPopup()
+          const appliedFactor = zoomChanged ? newZoom.divide(zoomFx).toNumber() : 1
+          const invFactor = fxp.fromNumber(1.0 / appliedFactor, p)
           const offsetX = ptr[0].subtract(renderer.center[0].withScale(p)).multiply(invFactor)
           const offsetY = ptr[1].subtract(renderer.center[1].withScale(p)).multiply(invFactor)
           renderer.center = [ptr[0].subtract(offsetX), ptr[1].subtract(offsetY)]
-          renderer.zoom = newZoom
+          renderer.setZoom(newZoom)
 
           redrawJulia()
           _refreshPinnedOrbits()
@@ -7483,14 +7611,19 @@ function initListeners() {
             lastY,
             fractal.precision,
           )
+          if (!zoomedPendingView.zoomChanged) {
+            lastTouchDistance = newTouchDistance
+            lastTouchCenter = newTouchCenter
+            return
+          }
           pendingInteractivePinchView = {
             center: zoomedPendingView.center,
             zoom: zoomedPendingView.zoom,
           }
           trackPendingInteractivePanTransform(dx, dy)
           panCanvas(dx, dy)
-          trackPendingInteractiveScaleTransform(factor, lastX, lastY)
-          scaleCanvas(factor, lastX, lastY)
+          trackPendingInteractiveScaleTransform(zoomedPendingView.appliedFactor, lastX, lastY)
+          scaleCanvas(zoomedPendingView.appliedFactor, lastX, lastY)
           scheduleGpuInteractiveRedraw()
           _refreshPinnedOrbits()
         } else {
@@ -7806,6 +7939,8 @@ function initListeners() {
 
   DOM.gpuToggle.addEventListener('change', (event) => {
     fractal.useGpu = event.target.checked
+    clearPendingInteractiveRedrawState()
+    fractal.applyZoomLimitForConfiguredMode()
     redraw()
   })
   DOM.fullScreenButton.addEventListener('click', (_event) => {
@@ -8559,7 +8694,7 @@ function initListeners() {
         if (!juliaState.renderer) return
         invalidateJuliaBuddhabrotView({ clearVisible: true })
         const p = juliaState.renderer.precision
-        juliaState.renderer.zoom = fxp.fromNumber(1, p)
+        juliaState.renderer.setZoom(fxp.fromNumber(1, p))
         juliaState.renderer.center = [fxp.fromNumber(0, p), fxp.fromNumber(0, p)]
         redrawJulia()
       })
@@ -8830,7 +8965,7 @@ function reset() {
 
   // Julia キャンバスの位置とズームも初期値へ戻す
   if (juliaState.renderer) {
-    juliaState.renderer.zoom = fxp.fromNumber(1, juliaState.renderer.precision)
+    juliaState.renderer.setZoom(fxp.fromNumber(1, juliaState.renderer.precision))
     juliaState.renderer.center = [
       fxp.fromNumber(0, juliaState.renderer.precision),
       fxp.fromNumber(0, juliaState.renderer.precision),
@@ -8886,7 +9021,7 @@ function resetPosition() {
 
   // Julia キャンバスの位置とズームも初期値へ戻す
   if (juliaState.renderer) {
-    juliaState.renderer.zoom = fxp.fromNumber(1, juliaState.renderer.precision)
+    juliaState.renderer.setZoom(fxp.fromNumber(1, juliaState.renderer.precision))
     juliaState.renderer.center = [
       fxp.fromNumber(0, juliaState.renderer.precision),
       fxp.fromNumber(0, juliaState.renderer.precision),
