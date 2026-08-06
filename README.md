@@ -70,6 +70,7 @@ At very high resolutions, switching can happen at different zoom levels to reduc
 
 - Orbit overlay toggle
 - Orbit drawing mode selector (Lines+Dots, Lines, Dots)
+- Orbit point gradient toggle based on iteration ratio
 - Hover detail popup toggle
 
 ### Orbit Trap Controls

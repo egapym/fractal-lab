@@ -5081,6 +5081,7 @@ let pendingInteractiveTransformTx = 0
 let pendingInteractiveTransformTy = 0
 let orbitDrawEnabled = false // 軌道表示が有効か
 let orbitMode = 'lines+dots' // 'lines+dots' | 'lines' | 'dots'
+let orbitGradientEnabled = false
 // 軌道の固定表示。キャンバスをクリックすると、その点に軌道を固定する。
 // 固定中は {clientX, clientY}、未固定なら null。
 let pinnedOrbit = null
@@ -5999,6 +6000,12 @@ function _computeOrbitPoints(z0r, z0i, cr, ci, iterFn, _complexToScreen, maxIter
   return { orbit, escaped }
 }
 
+function _getOrbitGradientDotColor(iterationIndex, totalIterations) {
+  const ratio = Math.min(1, Math.max(0, iterationIndex / Math.max(1, totalIterations)))
+  const hue = 58 - ratio * 54
+  return `hsl(${hue}, 100%, 50%)`
+}
+
 /**
  * 事前計算した軌道をキャンバスへ描画する。
  * @param ctx             クリア済みの 2D コンテキスト
@@ -6037,13 +6044,20 @@ function _paintOrbitOnCtx(
   }
 
   if (orbitMode !== 'lines') {
+    const gradientTotalIterations = Math.max(1, orbit.length - 1)
     for (let k = 0; k < orbit.length; k++) {
       const [xk, yk] = complexToScreen(orbit[k][0], orbit[k][1])
       const isFirst = k === 0
       const isLast = k === orbit.length - 1
       ctx.beginPath()
       ctx.arc(xk, yk, isFirst ? 4 : isLast ? 3.5 : 2.5, 0, Math.PI * 2)
-      ctx.fillStyle = isFirst ? 'rgba(255, 240, 60, 1)' : isLast ? 'rgba(255, 255, 255, 0.95)' : dotColor
+      ctx.fillStyle = orbitGradientEnabled
+        ? _getOrbitGradientDotColor(k, gradientTotalIterations)
+        : isFirst
+          ? 'rgba(255, 240, 60, 1)'
+          : isLast
+            ? 'rgba(255, 255, 255, 0.95)'
+            : dotColor
       ctx.fill()
     }
   } else {
@@ -6052,7 +6066,9 @@ function _paintOrbitOnCtx(
     const [xl, yl] = complexToScreen(last[0], last[1])
     ctx.beginPath()
     ctx.arc(xl, yl, 3.5, 0, Math.PI * 2)
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)'
+    ctx.fillStyle = orbitGradientEnabled
+      ? _getOrbitGradientDotColor(orbit.length - 1, Math.max(1, orbit.length - 1))
+      : 'rgba(255, 255, 255, 0.95)'
     ctx.fill()
   }
 
@@ -8643,6 +8659,13 @@ function initListeners() {
       orbitModeEl.addEventListener('change', (e) => {
         orbitMode = e.target.value
         // モード変更後に固定済み軌道を描き直す
+        _refreshPinnedOrbits()
+      })
+    }
+    const orbitGradientToggleEl = document.getElementById('orbit-gradient-toggle')
+    if (orbitGradientToggleEl) {
+      orbitGradientToggleEl.addEventListener('change', (e) => {
+        orbitGradientEnabled = e.target.checked
         _refreshPinnedOrbits()
       })
     }
