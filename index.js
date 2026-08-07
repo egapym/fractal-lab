@@ -5922,14 +5922,31 @@ function _getZ0Inputs() {
  * @param {number} oh  - orbit キャンバスの CSS 高さ
  * @returns {[number, number]} [cssX, cssY]
  */
-function _fxpComplexToOrbitCss(reFxp, imFxp, ow, oh) {
+function _getMainOrbitRenderView() {
   const prec = fractal.precision
+  let center = [fractal.center[0].withScale(prec), fractal.center[1].withScale(prec)]
+  let zoom = fractal.zoom.withScale(prec)
+
+  if (pendingInteractivePinchView) {
+    center = [pendingInteractivePinchView.center[0].withScale(prec), pendingInteractivePinchView.center[1].withScale(prec)]
+    zoom = pendingInteractivePinchView.zoom.withScale(prec)
+  }
+  if (hasPendingInteractivePan()) {
+    center = _centerAfterPixelDelta(center, zoom, pendingInteractivePanDx, pendingInteractivePanDy, prec)
+  }
+
+  return { center, zoom }
+}
+
+function _fxpComplexToOrbitCss(reFxp, imFxp, ow, oh, view = null) {
+  const prec = fractal.precision
+  const orbitView = view || _getMainOrbitRenderView()
   const fw = fractal.width,
     fh = fractal.height
   // scale = zoom * fw / 4（複素平面 1 単位あたりのピクセル数）
-  const scale_fxp = fractal.zoom.multiply(fxp.fromNumber(fw, prec)).divide(fxp.fromNumber(4, prec))
-  const dre = reFxp.withScale(prec).subtract(fractal.center[0])
-  const dim = imFxp.withScale(prec).subtract(fractal.center[1])
+  const scale_fxp = orbitView.zoom.withScale(prec).multiply(fxp.fromNumber(fw, prec)).divide(fxp.fromNumber(4, prec))
+  const dre = reFxp.withScale(prec).subtract(orbitView.center[0])
+  const dim = imFxp.withScale(prec).subtract(orbitView.center[1])
   const dre_px = dre.multiply(scale_fxp).toNumber()
   const dim_px = dim.multiply(scale_fxp).toNumber()
   return [((dre_px + fw / 2) / fw) * ow, ((dim_px + fh / 2) / fh) * oh]
@@ -6121,12 +6138,13 @@ function drawOrbitOnCanvasAtComplex(cReal, cImag, refPixX = null, refPixY = null
   const ctx = orbitCanvas.getContext('2d')
   ctx.clearRect(0, 0, ow, oh)
 
-  const zoomVal = fractal.zoom.toNumber ? fractal.zoom.toNumber() : 1
+  const orbitView = _getMainOrbitRenderView()
+  const zoomVal = orbitView.zoom.toNumber ? orbitView.zoom.toNumber() : 1
   const fw = fractal.width,
     fh = fractal.height
   const scale = (zoomVal * fw) / 4
-  const centerX = fractal.center[0].toNumber ? fractal.center[0].toNumber() : 0
-  const centerY = fractal.center[1].toNumber ? fractal.center[1].toNumber() : 0
+  const centerX = orbitView.center[0].toNumber ? orbitView.center[0].toNumber() : 0
+  const centerY = orbitView.center[1].toNumber ? orbitView.center[1].toNumber() : 0
 
   // 十字マーカーの位置は、使える中で最も精度の高い方法で求める:
   //   1. FxP 演算（どのズームでも Float64 の桁落ちを避ける）
@@ -6135,7 +6153,7 @@ function drawOrbitOnCanvasAtComplex(cReal, cImag, refPixX = null, refPixY = null
   let baseCssX, baseCssY
   if (cReFxp !== null && cImFxp !== null) {
     try {
-      ;[baseCssX, baseCssY] = _fxpComplexToOrbitCss(cReFxp, cImFxp, ow, oh)
+      ;[baseCssX, baseCssY] = _fxpComplexToOrbitCss(cReFxp, cImFxp, ow, oh, orbitView)
     } catch (_) {
       baseCssX = refPixX !== null ? (refPixX * ow) / fw : (((cReal - centerX) * scale + fw / 2) / fw) * ow
       baseCssY = refPixY !== null ? (refPixY * oh) / fh : (((cImag - centerY) * scale + fh / 2) / fh) * oh
