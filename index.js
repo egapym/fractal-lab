@@ -7736,6 +7736,8 @@ function initListeners() {
     const changed = setIterations(val)
     if (changed && !BuddhabrotState.isViewEnabled()) {
       redraw()
+      if (juliaState.active && !isJuliaCanvasInteractionBlockedByBuddhabrot()) syncJuliaRendererSettingsFromMain()
+      _refreshPinnedOrbits()
     }
   })
   DOM.iterations.addEventListener('keydown', (event) => {
@@ -7747,6 +7749,8 @@ function initListeners() {
         const changed = setIterations(val)
         if (changed && !BuddhabrotState.isViewEnabled()) {
           redraw()
+          if (juliaState.active && !isJuliaCanvasInteractionBlockedByBuddhabrot()) syncJuliaRendererSettingsFromMain()
+          _refreshPinnedOrbits()
         }
       } catch (e) {
         console.warn('Error handling Enter on iterations input:', e)
