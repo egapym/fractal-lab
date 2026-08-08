@@ -6975,6 +6975,28 @@ function shouldSuppressResizeRedraw() {
   return performance.now() < suppressResizeRedrawUntil
 }
 
+function getDevicePixelRatioCanvasSize() {
+  try {
+    const dpr = window.devicePixelRatio || 1
+    if (!Number.isFinite(dpr) || dpr <= 1) return null
+    const rect = canvasElement.getBoundingClientRect()
+    const cssWidth = rect.width || canvasElement.offsetWidth
+    const cssHeight = rect.height || canvasElement.offsetHeight
+    const width = Math.max(1, Math.round(cssWidth * dpr))
+    const height = Math.max(1, Math.round(cssHeight * dpr))
+    if (width <= Math.round(cssWidth) || height <= Math.round(cssHeight)) return null
+    return [width, height]
+  } catch (_e) {
+    return null
+  }
+}
+
+function updateFullResToggleAvailability() {
+  if (typeof fullResToggle !== 'undefined' && fullResToggle !== null) {
+    fullResToggle.disabled = devicePixelBoxSize == null
+  }
+}
+
 function setStyleIfChanged(element, property, value) {
   if (!element) return false
   if (element.style[property] === value) return false
@@ -7021,26 +7043,16 @@ function onResize(entries) {
       }
     }
   }
-  if (typeof fullResToggle !== 'undefined' && fullResToggle !== null) {
-    fullResToggle.disabled = devicePixelBoxSize == null
+  if (devicePixelBoxSize == null) {
+    devicePixelBoxSize = getDevicePixelRatioCanvasSize()
   }
+  updateFullResToggleAvailability()
   resizeToCanvasSize()
 }
 
 function refreshDevicePixelBoxSize() {
-  devicePixelBoxSize = null
-  try {
-    const dpr = window.devicePixelRatio || 1
-    const rect = canvasElement.getBoundingClientRect()
-    const width = Math.max(1, Math.round(rect.width * dpr))
-    const height = Math.max(1, Math.round(rect.height * dpr))
-    if (width > 0 && height > 0) {
-      devicePixelBoxSize = [width, height]
-    }
-  } catch (_e) {}
-  if (typeof fullResToggle !== 'undefined' && fullResToggle !== null) {
-    fullResToggle.disabled = devicePixelBoxSize == null
-  }
+  devicePixelBoxSize = getDevicePixelRatioCanvasSize()
+  updateFullResToggleAvailability()
 }
 
 function resizeToCanvasSize() {
