@@ -6969,22 +6969,62 @@ let resizeRafId = null
 let pendingResizeEntries = null
 let lastAppliedCanvasSizeKey = ''
 let lastKnownViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0
+let lastKnownDevicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+let canvasPixelResizeObserver = null
+let devicePixelRatioQuery = null
+let devicePixelRatioQueryHandler = null
 let suppressResizeRedrawUntil = 0
 
 function shouldSuppressResizeRedraw() {
   return performance.now() < suppressResizeRedrawUntil
 }
 
-function getDevicePixelRatioCanvasSize() {
+function getDisplayPixelCanvasSize(canvas = canvasElement) {
   try {
-    const dpr = window.devicePixelRatio || 1
-    if (!Number.isFinite(dpr) || dpr <= 1) return null
-    const rect = canvasElement.getBoundingClientRect()
-    const cssWidth = rect.width || canvasElement.offsetWidth
-    const cssHeight = rect.height || canvasElement.offsetHeight
-    const width = Math.max(1, Math.round(cssWidth * dpr))
-    const height = Math.max(1, Math.round(cssHeight * dpr))
-    if (width <= Math.round(cssWidth) || height <= Math.round(cssHeight)) return null
+    const rect = canvas.getBoundingClientRect()
+    const cssWidth = rect.width || canvas.offsetWidth || 1
+    const cssHeight = rect.height || canvas.offsetHeight || 1
+    return [Math.max(1, Math.round(cssWidth)), Math.max(1, Math.round(cssHeight))]
+  } catch (_e) {
+    return [Math.max(1, Math.round(canvas?.offsetWidth || 1)), Math.max(1, Math.round(canvas?.offsetHeight || 1))]
+  }
+}
+
+function getWindowDevicePixelRatio() {
+  const dpr = window.devicePixelRatio || 1
+  return Number.isFinite(dpr) && dpr > 0 ? dpr : 1
+}
+
+function differsFromDisplayPixels(width, height, displayWidth, displayHeight) {
+  return Math.round(width) !== Math.round(displayWidth) || Math.round(height) !== Math.round(displayHeight)
+}
+
+function getDevicePixelContentBoxCanvasSize(entry) {
+  try {
+    const size = Array.isArray(entry?.devicePixelContentBoxSize)
+      ? entry.devicePixelContentBoxSize[0]
+      : entry?.devicePixelContentBoxSize
+    const rawWidth = Number(size?.inlineSize)
+    const rawHeight = Number(size?.blockSize)
+    if (!Number.isFinite(rawWidth) || !Number.isFinite(rawHeight) || rawWidth <= 0 || rawHeight <= 0) return null
+    const width = Math.max(1, Math.round(rawWidth))
+    const height = Math.max(1, Math.round(rawHeight))
+    const [displayWidth, displayHeight] = getDisplayPixelCanvasSize(canvasElement)
+    if (!differsFromDisplayPixels(width, height, displayWidth, displayHeight)) return null
+    return [width, height]
+  } catch (_e) {
+    return null
+  }
+}
+
+function getDevicePixelRatioCanvasSize(canvas = canvasElement) {
+  try {
+    const dpr = getWindowDevicePixelRatio()
+    if (dpr <= 1) return null
+    const [displayWidth, displayHeight] = getDisplayPixelCanvasSize(canvas)
+    const width = Math.max(1, Math.round(displayWidth * dpr))
+    const height = Math.max(1, Math.round(displayHeight * dpr))
+    if (!differsFromDisplayPixels(width, height, displayWidth, displayHeight)) return null
     return [width, height]
   } catch (_e) {
     return null
@@ -6994,6 +7034,58 @@ function getDevicePixelRatioCanvasSize() {
 function updateFullResToggleAvailability() {
   if (typeof fullResToggle !== 'undefined' && fullResToggle !== null) {
     fullResToggle.disabled = devicePixelBoxSize == null
+  }
+}
+
+function fullResUsesPhysicalPixels() {
+  return fullResToggle?.checked && devicePixelBoxSize != null
+}
+
+function getCanvasBufferSizeForDisplaySize(displayWidth, displayHeight) {
+  const width = Math.max(1, Math.round(displayWidth))
+  const height = Math.max(1, Math.round(displayHeight))
+  if (!fullResUsesPhysicalPixels()) return [width, height]
+  const dpr = getWindowDevicePixelRatio()
+  const physicalWidth = Math.max(1, Math.round(width * dpr))
+  const physicalHeight = Math.max(1, Math.round(height * dpr))
+  if (!differsFromDisplayPixels(physicalWidth, physicalHeight, width, height)) return [width, height]
+  return [physicalWidth, physicalHeight]
+}
+
+function syncDevicePixelRatioWatcher() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+  if (devicePixelRatioQuery && devicePixelRatioQueryHandler) {
+    if (typeof devicePixelRatioQuery.removeEventListener === 'function') {
+      devicePixelRatioQuery.removeEventListener('change', devicePixelRatioQueryHandler)
+    } else if (typeof devicePixelRatioQuery.removeListener === 'function') {
+      devicePixelRatioQuery.removeListener(devicePixelRatioQueryHandler)
+    }
+  }
+
+  const dpr = getWindowDevicePixelRatio()
+  lastKnownDevicePixelRatio = dpr
+  devicePixelRatioQuery = window.matchMedia(`(resolution: ${dpr}dppx)`)
+  devicePixelRatioQueryHandler = () => {
+    syncDevicePixelRatioWatcher()
+    scheduleResize()
+  }
+
+  if (typeof devicePixelRatioQuery.addEventListener === 'function') {
+    devicePixelRatioQuery.addEventListener('change', devicePixelRatioQueryHandler)
+  } else if (typeof devicePixelRatioQuery.addListener === 'function') {
+    devicePixelRatioQuery.addListener(devicePixelRatioQueryHandler)
+  }
+}
+
+function observeCanvasPixelSize() {
+  if (typeof ResizeObserver === 'undefined' || canvasPixelResizeObserver) return
+  canvasPixelResizeObserver = new ResizeObserver((entries) => {
+    scheduleResize(entries)
+  })
+  try {
+    canvasPixelResizeObserver.observe(canvasElement, { box: 'device-pixel-content-box' })
+  } catch (_e) {
+    canvasPixelResizeObserver.observe(canvasElement)
   }
 }
 
@@ -7035,17 +7127,12 @@ function onResize(entries) {
   devicePixelBoxSize = null
   if (entries && entries.length > 0) {
     const entry = entries[0]
-    if (entry.devicePixelContentBoxSize) {
-      const w = entry.devicePixelContentBoxSize[0].inlineSize
-      const h = entry.devicePixelContentBoxSize[0].blockSize
-      if (w !== canvasElement.offsetWidth || h !== canvasElement.offsetHeight) {
-        devicePixelBoxSize = [w, h]
-      }
-    }
+    devicePixelBoxSize = getDevicePixelContentBoxCanvasSize(entry)
   }
   if (devicePixelBoxSize == null) {
     devicePixelBoxSize = getDevicePixelRatioCanvasSize()
   }
+  lastKnownDevicePixelRatio = getWindowDevicePixelRatio()
   updateFullResToggleAvailability()
   resizeToCanvasSize()
 }
@@ -7071,11 +7158,10 @@ function resizeToCanvasSize() {
         setStyleIfChanged(juliaWrap, 'flex', '0 0 auto')
       }
       // Hi DPI: CSS表示サイズ(vw/vh)は変えず、バッファを物理ピクセルに拡大する
-      const hiDPIFs = fullResToggle?.checked && devicePixelBoxSize != null
-      const dprFs = hiDPIFs ? window.devicePixelRatio : 1
+      const [juliaBufferWidth, juliaBufferHeight] = getCanvasBufferSizeForDisplaySize(vw, vh)
       const jCanvas = document.getElementById('julia-canvas')
       if (jCanvas && juliaState.renderer) {
-        const jCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, Math.round(vw * dprFs), Math.round(vh * dprFs))
+        const jCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, juliaBufferWidth, juliaBufferHeight)
         if (jCanvasChanged) juliaState.renderer.resized()
       }
 
@@ -7088,7 +7174,7 @@ function resizeToCanvasSize() {
       }
 
       const sizeEl = document.getElementById('sizeValue')
-      if (sizeEl) sizeEl.innerText = `${Math.round(vw * dprFs)}x${Math.round(vh * dprFs)}`
+      if (sizeEl) sizeEl.innerText = `${juliaBufferWidth}x${juliaBufferHeight}`
       showZoomFactor()
       if (!shouldSuppressResizeRedraw()) redraw()
       return
@@ -7147,10 +7233,7 @@ function resizeToCanvasSize() {
     }
 
     // Hi DPI: CSS表示サイズ(canvasW/canvasH)は変えず、バッファを物理ピクセルに拡大する
-    const hiDPI = fullResToggle?.checked && devicePixelBoxSize != null
-    const dpr = hiDPI ? window.devicePixelRatio : 1
-    const bufW = Math.round(canvasW * dpr)
-    const bufH = Math.round(canvasH * dpr)
+    const [bufW, bufH] = getCanvasBufferSizeForDisplaySize(canvasW, canvasH)
 
     const sizeEl = document.getElementById('sizeValue')
     if (sizeEl) sizeEl.innerText = `${bufW}x${bufH}`
@@ -7220,14 +7303,14 @@ function resizeToCanvasSize() {
     refreshDevicePixelBoxSize()
   }
 
-  if (fullResToggle?.checked && devicePixelBoxSize != null) {
+  if (fullResUsesPhysicalPixels()) {
     ;[width, height] = devicePixelBoxSize
   }
 
   const sizeEl = document.getElementById('sizeValue')
   if (sizeEl) sizeEl.innerText = `${width}x${height}`
 
-  const sizeKey = `${width}x${height}|julia:${juliaState?.active ? 1 : 0}|fs:${document.fullscreenElement ? 1 : 0}|hidpi:${fullResToggle?.checked && devicePixelBoxSize != null ? 1 : 0}`
+  const sizeKey = `${width}x${height}|julia:${juliaState?.active ? 1 : 0}|fs:${document.fullscreenElement ? 1 : 0}|hidpi:${fullResUsesPhysicalPixels() ? 1 : 0}`
   if (lastAppliedCanvasSizeKey === sizeKey && canvasElement.width === width && canvasElement.height === height) {
     showZoomFactor()
     return
@@ -7384,9 +7467,12 @@ function initListeners() {
     clearTimeout(_juliaResizeTimer)
     _juliaResizeTimer = setTimeout(() => {
       const currentWidth = window.innerWidth
+      const currentDevicePixelRatio = getWindowDevicePixelRatio()
       const widthChanged = currentWidth !== lastKnownViewportWidth
+      const devicePixelRatioChanged = currentDevicePixelRatio !== lastKnownDevicePixelRatio
       lastKnownViewportWidth = currentWidth
-      if (!widthChanged && !juliaState?.active && !document.fullscreenElement) return
+      lastKnownDevicePixelRatio = currentDevicePixelRatio
+      if (!widthChanged && !devicePixelRatioChanged && !juliaState?.active && !document.fullscreenElement) return
       scheduleResize()
       if (juliaState?.active && !document.fullscreenElement) {
         redrawJulia()
@@ -7400,6 +7486,8 @@ function initListeners() {
     if (!juliaState?.active && !document.fullscreenElement) return
     scheduleResize()
   })
+  observeCanvasPixelSize()
+  syncDevicePixelRatioWatcher()
 
   canvasElement.addEventListener('mousedown', onMouseDown)
   canvasElement.addEventListener('mousemove', onMouseMove)
