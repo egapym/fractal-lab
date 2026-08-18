@@ -726,8 +726,8 @@
                   />
                 </div>
               </div>
-              <div class="g-1 row">
-                <div class="col-4">
+              <div class="g-1 row settings-action-row settings-action-row--buddha">
+                <div class="col-4 action-col action-col--render">
                   <button
                     id="buddha-render"
                     class="btn btn-primary btn-sm w-100"
@@ -736,7 +736,7 @@
                     Render Buddhabrot
                   </button>
                 </div>
-                <div class="col-2">
+                <div class="col-2 action-col action-col--stop">
                   <button
                     id="buddha-stop"
                     class="btn btn-outline-danger btn-sm w-100"
@@ -746,7 +746,7 @@
                     Stop
                   </button>
                 </div>
-                <div class="col-3">
+                <div class="col-3 action-col action-col--scale">
                   <select
                     id="buddha-scale"
                     class="form-select form-select-sm"
@@ -759,7 +759,7 @@
                     <option value="5">5x</option>
                   </select>
                 </div>
-                <div class="col-3">
+                <div class="col-3 action-col action-col--download">
                   <button
                     id="buddha-download"
                     class="btn btn-success btn-sm w-100"
@@ -775,7 +775,7 @@
             <hr />
           </div>
           <!-- /#buddhabrot-section -->
-          <div class="g-1 row">
+          <div class="g-1 row settings-action-row settings-action-row--primary">
             <div class="col col-sm-6">
               <button class="btn btn-success btn-sm w-100" id="fullscreen" title="Toggle fullscreen mode. Shortcut: f">
                 Fullscreen
@@ -791,7 +791,7 @@
               </button>
             </div>
           </div>
-          <div class="g-1 row">
+          <div class="g-1 row settings-action-row settings-action-row--secondary">
             <div class="col col-sm-6 d-flex align-items-center">
               <button
                 id="save-image"
@@ -802,8 +802,8 @@
                 Save Image
               </button>
             </div>
-            <div class="col col-sm-6 d-flex align-items-center gap-2">
-              <div style="flex: 1">
+            <div class="col col-sm-6 d-flex align-items-center gap-2 settings-inline-controls">
+              <div class="settings-jump-control" style="flex: 1">
                 <select
                   id="jump-to"
                   class="form-select form-select-sm w-100"
@@ -814,7 +814,7 @@
                   <!-- options populated by JS -->
                 </select>
               </div>
-              <div>
+              <div class="settings-animation-control">
                 <label for="anim-enable" class="col-form-label py-0 d-block">Animation</label>
                 <div class="d-flex align-items-center py-1">
                   <div class="form-check form-switch m-0">
@@ -828,7 +828,12 @@
                   </div>
                 </div>
               </div>
-              <button id="anim-stop" class="btn btn-outline-danger btn-sm" title="Stop animation" type="button">
+              <button
+                id="anim-stop"
+                class="btn btn-outline-danger btn-sm settings-inline-stop"
+                title="Stop animation"
+                type="button"
+              >
                 Stop
               </button>
               <!-- Animation speed fixed to 0.15 (slider removed) -->

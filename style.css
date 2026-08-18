@@ -251,6 +251,15 @@ html.embedded-mode #mandelbrot-canvas {
     min-height: 0;
 }
 
+/* iOS Safari avoids focus zoom when form controls are at least 16px. */
+@media (hover: none) and (pointer: coarse) {
+    #settings input,
+    #settings select,
+    #settings textarea {
+        font-size: 16px !important;
+    }
+}
+
 #settings .container.container-sm {
     padding-left: 0;
     padding-right: 0.3rem;
@@ -433,6 +442,17 @@ footer {
     border-radius: 0.25rem;
 }
 
+#settings .btn {
+    white-space: nowrap;
+}
+
+#settings .settings-jump-control,
+#settings .settings-animation-control,
+#settings #buddha-scale,
+#settings #jump-to {
+    min-width: 0;
+}
+
 /* フルスクリーン時は入力欄を半透明背景でも読みやすくする */
 #settings.fullscreen input[type="text"],
 #settings.fullscreen input[type="number"],
@@ -514,6 +534,55 @@ footer {
     #mandelbrot {
         margin-left: 0;
         margin-right: 0;
+    }
+}
+
+@media (max-width: 520px) {
+    #settings .settings-action-row {
+        --bs-gutter-x: 0;
+        display: grid;
+        gap: 0.25rem;
+        margin-left: 0;
+        margin-right: 0;
+    }
+
+    #settings .settings-action-row + .settings-action-row {
+        margin-top: 0.25rem;
+    }
+
+    #settings .settings-action-row > [class*="col"] {
+        width: auto;
+        max-width: none;
+        flex: initial;
+        padding-left: 0;
+        padding-right: 0;
+    }
+
+    #settings .settings-action-row--buddha {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #settings .settings-action-row--buddha .action-col--render,
+    #settings .settings-action-row--buddha .action-col--download,
+    #settings .settings-action-row--primary > *,
+    #settings .settings-action-row--secondary > * {
+        grid-column: 1 / -1;
+    }
+
+    #settings .settings-inline-controls {
+        flex-wrap: wrap;
+    }
+
+    #settings .settings-jump-control {
+        flex: 1 1 100%;
+    }
+
+    #settings .settings-animation-control {
+        flex: 1 1 auto;
+    }
+
+    #settings .settings-inline-stop {
+        margin-left: auto;
     }
 }
 
