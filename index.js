@@ -3226,12 +3226,24 @@ function restoreSavedImageToCanvas(savedImageData, canvas) {
   CanvasHelpers.restoreImage(ctx, savedImageData, canvas.width, canvas.height)
 }
 
-function restoreFractalDisplayAfterClearingBuddha() {
+function restoreFractalDisplayAfterClearingBuddha(targetKind = savedFractalImageData?.targetKind) {
   if (!savedFractalImageData) return false
-  const canvas = getBuddhabrotDisplayCanvas(savedFractalImageData.targetKind)
+  if (targetKind !== savedFractalImageData.targetKind) return false
+  const canvas = getBuddhabrotDisplayCanvas(targetKind)
   if (!canvas) return false
   restoreSavedImageToCanvas(savedFractalImageData, canvas)
   return true
+}
+
+function restoreOrRedrawFractalDisplayAfterClearingBuddha(targetKind = 'main') {
+  const currentState = FractalStateHelpers.getCurrentState(targetKind)
+  const canRestore =
+    savedFractalImageData &&
+    savedFractalImageData.targetKind === targetKind &&
+    FractalStateHelpers.stateMatches(savedFractalImageData, currentState)
+  if (canRestore && restoreFractalDisplayAfterClearingBuddha(targetKind)) return true
+  redrawBuddhabrotSourceView(targetKind)
+  return false
 }
 
 function redrawBuddhabrotSourceView(targetKind = BuddhabrotState.targetKind) {
@@ -5146,7 +5158,6 @@ function stopRenderingForJuliaToggleDuringBuddhabrot() {
 
   if (shouldClearBuddhabrot) {
     stopAndClearBuddha()
-    restoreFractalDisplayAfterClearingBuddha()
   } else {
     finishBuddhabrotProgress(BuddhabrotState.targetKind)
     hideInactiveBuddhabrotProgress(BuddhabrotState.targetKind)
@@ -6969,14 +6980,57 @@ let resizeRafId = null
 let pendingResizeEntries = null
 let lastAppliedCanvasSizeKey = ''
 let lastKnownViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0
+let lastKnownViewportHeight = typeof window !== 'undefined' ? window.innerHeight : 0
 let lastKnownDevicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+let lastKnownScrollX = typeof window !== 'undefined' ? window.scrollX || 0 : 0
+let lastKnownScrollY = typeof window !== 'undefined' ? window.scrollY || 0 : 0
+let lastViewportScrollAt = 0
 let canvasPixelResizeObserver = null
 let devicePixelRatioQuery = null
 let devicePixelRatioQueryHandler = null
 let suppressResizeRedrawUntil = 0
+const SCROLL_RESIZE_SUPPRESSION_MS = 350
 
 function shouldSuppressResizeRedraw() {
   return performance.now() < suppressResizeRedrawUntil
+}
+
+function noteViewportScroll() {
+  lastKnownScrollX = window.scrollX || 0
+  lastKnownScrollY = window.scrollY || 0
+  lastViewportScrollAt = performance.now()
+}
+
+function didViewportScrollRecently() {
+  const scrollX = window.scrollX || 0
+  const scrollY = window.scrollY || 0
+  if (scrollX !== lastKnownScrollX || scrollY !== lastKnownScrollY) {
+    lastKnownScrollX = scrollX
+    lastKnownScrollY = scrollY
+    lastViewportScrollAt = performance.now()
+    return true
+  }
+  return performance.now() - lastViewportScrollAt < SCROLL_RESIZE_SUPPRESSION_MS
+}
+
+function shouldIgnoreScrollOnlyResize(entries) {
+  if (document.fullscreenElement) return false
+  const currentWidth = window.innerWidth
+  const currentHeight = window.innerHeight
+  const currentDevicePixelRatio = getWindowDevicePixelRatio()
+  const widthChanged = currentWidth !== lastKnownViewportWidth
+  const heightChanged = currentHeight !== lastKnownViewportHeight
+  const devicePixelRatioChanged = currentDevicePixelRatio !== lastKnownDevicePixelRatio
+  const hasObservedCanvasResize = entries && entries.length > 0
+  if ((heightChanged || hasObservedCanvasResize) && !widthChanged && !devicePixelRatioChanged && didViewportScrollRecently()) {
+    lastKnownViewportHeight = currentHeight
+    lastKnownDevicePixelRatio = currentDevicePixelRatio
+    return true
+  }
+  lastKnownViewportWidth = currentWidth
+  lastKnownViewportHeight = currentHeight
+  lastKnownDevicePixelRatio = currentDevicePixelRatio
+  return false
 }
 
 function getDisplayPixelCanvasSize(canvas = canvasElement) {
@@ -7123,6 +7177,7 @@ function scheduleResize(entries) {
 
 function onResize(entries) {
   // let debugText = `${canvasElement.offsetWidth}x${canvasElement.offsetHeight}`
+  if (shouldIgnoreScrollOnlyResize(entries)) return false
 
   devicePixelBoxSize = null
   if (entries && entries.length > 0) {
@@ -7134,7 +7189,7 @@ function onResize(entries) {
   }
   lastKnownDevicePixelRatio = getWindowDevicePixelRatio()
   updateFullResToggleAvailability()
-  resizeToCanvasSize()
+  return resizeToCanvasSize()
 }
 
 function refreshDevicePixelBoxSize() {
@@ -7160,15 +7215,17 @@ function resizeToCanvasSize() {
       // Hi DPI: CSS表示サイズ(vw/vh)は変えず、バッファを物理ピクセルに拡大する
       const [juliaBufferWidth, juliaBufferHeight] = getCanvasBufferSizeForDisplaySize(vw, vh)
       const jCanvas = document.getElementById('julia-canvas')
+      let juliaCanvasChanged = false
       if (jCanvas && juliaState.renderer) {
-        const jCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, juliaBufferWidth, juliaBufferHeight)
+        juliaCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, juliaBufferWidth, juliaBufferHeight)
         if (jCanvasChanged) juliaState.renderer.resized()
       }
 
       // MB キャンバスは設定パネル内のプレビューなので、CSS 上の表示サイズを使う
       const mbW = Math.max(1, canvasElement.offsetWidth)
       const mbH = Math.max(1, canvasElement.offsetHeight)
-      if (setCanvasBufferSizeIfChanged(canvasElement, mbW, mbH)) {
+      const mainCanvasChanged = setCanvasBufferSizeIfChanged(canvasElement, mbW, mbH)
+      if (mainCanvasChanged) {
         resizeTmpCanvas()
         fractal.resized()
       }
@@ -7176,8 +7233,9 @@ function resizeToCanvasSize() {
       const sizeEl = document.getElementById('sizeValue')
       if (sizeEl) sizeEl.innerText = `${juliaBufferWidth}x${juliaBufferHeight}`
       showZoomFactor()
-      if (!shouldSuppressResizeRedraw()) redraw()
-      return
+      const canvasSizeChanged = mainCanvasChanged || juliaCanvasChanged
+      if (canvasSizeChanged && !shouldSuppressResizeRedraw()) redraw()
+      return canvasSizeChanged
     }
 
     // ── 非フルスクリーン Julia: 2 枚のキャンバスを縦積みで収める ──
@@ -7244,10 +7302,13 @@ function resizeToCanvasSize() {
 
     // Julia キャンバスの実ピクセルサイズを設定する
     const jCanvas = document.getElementById('julia-canvas')
+    let juliaCanvasChanged = false
     if (jCanvas && juliaState.renderer) {
-      const juliaCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, bufW, bufH)
+      juliaCanvasChanged = setCanvasBufferSizeIfChanged(jCanvas, bufW, bufH)
       if (juliaCanvasChanged) juliaState.renderer.resized()
     }
+
+    if (mainCanvasChanged) fractal.resized()
 
     // Buddhabrot 表示中は、その結果を描き直して見た目を保つ
     if (buddhaActive && buddhaRunner) {
@@ -7265,13 +7326,13 @@ function resizeToCanvasSize() {
         )
       } catch (_e) {}
       showZoomFactor()
-      return
+      return mainCanvasChanged || juliaCanvasChanged
     }
 
-    if (mainCanvasChanged) fractal.resized()
     showZoomFactor()
-    if (mainCanvasChanged && !shouldSuppressResizeRedraw()) redraw()
-    return
+    const canvasSizeChanged = mainCanvasChanged || juliaCanvasChanged
+    if (canvasSizeChanged && !shouldSuppressResizeRedraw()) redraw()
+    return canvasSizeChanged
   }
 
   // ── 通常モード ──────────────────────────────────────────
@@ -7313,7 +7374,7 @@ function resizeToCanvasSize() {
   const sizeKey = `${width}x${height}|julia:${juliaState?.active ? 1 : 0}|fs:${document.fullscreenElement ? 1 : 0}|hidpi:${fullResUsesPhysicalPixels() ? 1 : 0}`
   if (lastAppliedCanvasSizeKey === sizeKey && canvasElement.width === width && canvasElement.height === height) {
     showZoomFactor()
-    return
+    return false
   }
   lastAppliedCanvasSizeKey = sizeKey
 
@@ -7343,12 +7404,13 @@ function resizeToCanvasSize() {
     }
     // UI 表示だけ更新し、重い再描画は起こさない
     showZoomFactor()
-    return
+    return mainCanvasChanged
   }
 
   if (mainCanvasChanged) fractal.resized()
   showZoomFactor()
-  if (!shouldSuppressResizeRedraw()) redraw()
+  if (mainCanvasChanged && !shouldSuppressResizeRedraw()) redraw()
+  return mainCanvasChanged
 }
 
 function toggleFullScreen() {
@@ -7467,16 +7529,26 @@ function initListeners() {
     clearTimeout(_juliaResizeTimer)
     _juliaResizeTimer = setTimeout(() => {
       const currentWidth = window.innerWidth
+      const currentHeight = window.innerHeight
       const currentDevicePixelRatio = getWindowDevicePixelRatio()
       const widthChanged = currentWidth !== lastKnownViewportWidth
+      const heightChanged = currentHeight !== lastKnownViewportHeight
       const devicePixelRatioChanged = currentDevicePixelRatio !== lastKnownDevicePixelRatio
+      if (
+        !document.fullscreenElement &&
+        !widthChanged &&
+        !devicePixelRatioChanged &&
+        heightChanged &&
+        didViewportScrollRecently()
+      ) {
+        lastKnownViewportHeight = currentHeight
+        return
+      }
       lastKnownViewportWidth = currentWidth
+      lastKnownViewportHeight = currentHeight
       lastKnownDevicePixelRatio = currentDevicePixelRatio
       if (!widthChanged && !devicePixelRatioChanged && !juliaState?.active && !document.fullscreenElement) return
       scheduleResize()
-      if (juliaState?.active && !document.fullscreenElement) {
-        redrawJulia()
-      }
     }, 60)
   })
   window.addEventListener('orientationchange', () => {
@@ -7484,8 +7556,11 @@ function initListeners() {
   })
   window.visualViewport?.addEventListener('resize', () => {
     if (!juliaState?.active && !document.fullscreenElement) return
+    if (!document.fullscreenElement && didViewportScrollRecently()) return
     scheduleResize()
   })
+  window.addEventListener('scroll', noteViewportScroll, { passive: true })
+  window.visualViewport?.addEventListener('scroll', noteViewportScroll, { passive: true })
   observeCanvasPixelSize()
   syncDevicePixelRatioWatcher()
 
@@ -8141,7 +8216,11 @@ function initListeners() {
   })
   fullResToggle.addEventListener('change', (_event) => {
     resizeToCanvasSize()
-    if (!buddhaActive) redraw()
+    if (isBuddhabrotViewShownOnJulia()) {
+      restoreOrRedrawFractalDisplayAfterClearingBuddha('main')
+    } else if (!buddhaActive) {
+      redraw()
+    }
   })
 
   // 各スライダーのリセットボタン
@@ -8828,7 +8907,7 @@ function initListeners() {
             enterJuliaFullscreen({ redraw: !stoppedBuddhabrotRendering })
             if (stoppedBuddhabrotRendering) {
               requestAnimationFrame(() => {
-                restoreFractalDisplayAfterClearingBuddha()
+                restoreOrRedrawFractalDisplayAfterClearingBuddha('main')
                 redrawJulia()
               })
             }
@@ -8836,7 +8915,7 @@ function initListeners() {
             requestAnimationFrame(() => {
               resizeToCanvasSize()
               if (stoppedBuddhabrotRendering) {
-                restoreFractalDisplayAfterClearingBuddha()
+                restoreOrRedrawFractalDisplayAfterClearingBuddha('main')
                 redrawJulia()
               } else {
                 redrawJulia()
@@ -8882,7 +8961,7 @@ function initListeners() {
           }
           requestAnimationFrame(() => {
             resizeToCanvasSize()
-            if (stoppedBuddhabrotRendering) restoreFractalDisplayAfterClearingBuddha()
+            if (stoppedBuddhabrotRendering) restoreOrRedrawFractalDisplayAfterClearingBuddha('main')
           })
         }
       })
