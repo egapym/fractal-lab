@@ -745,6 +745,7 @@ class Mandelbrot {
     this.jobLevel = 0
     this.viewRevision = 0
     this.activeGpuViewRevision = 0
+    this.activeGpuScreen = null
     this.interactiveGpuRedraw = false
     this.currentInteractionGpuRedraw = false
     this._lastOrbitTrapGpuRenderKey = null
@@ -1256,6 +1257,7 @@ class Mandelbrot {
     this._createJobToken()
 
     const screen = this.offscreens[this.offscreens.length - 1]
+    this.activeGpuScreen = screen
     const w = screen.buffer.width
     const h = screen.buffer.height
 
@@ -1311,7 +1313,8 @@ class Mandelbrot {
     this._revokeJobToken()
     this._createJobToken()
 
-    const screen = this.offscreens[this.offscreens.length - 1]
+    const screen = getMainGpuRenderScreenForState(this)
+    this.activeGpuScreen = screen
     const w = screen.buffer.width
     const h = screen.buffer.height
 
@@ -1359,6 +1362,7 @@ class Mandelbrot {
     this._createJobToken()
 
     const screen = this.offscreens[this.offscreens.length - 1]
+    this.activeGpuScreen = screen
     const w = screen.buffer.width
     const h = screen.buffer.height
 
@@ -1438,7 +1442,7 @@ class Mandelbrot {
     // GPU 更新成功時も、ワーカー由来のエラー表示が残っているなら消さない
     if (!iterationFunctionHasError) setIterationFunctionLabelError(false)
 
-    const screen = this.offscreens[this.offscreens.length - 1]
+    const screen = this.activeGpuScreen || this.offscreens[this.offscreens.length - 1]
     if (answer.rgba) {
       if (answer.isFinished) {
         this.progress.finish()
@@ -5084,6 +5088,7 @@ let juliaLastTouchDistance = null
 let juliaLastTouchCenter = null
 let gpuInteractiveRedrawTimer = null
 let gpuInteractiveRedrawPending = false
+let gpuInteractiveNeedsFinalRedraw = false
 let lastGpuInteractiveRedrawAt = 0
 let pendingInteractivePanDx = 0
 let pendingInteractivePanDy = 0
@@ -5112,6 +5117,31 @@ const GPU_INTERACTIVE_REDRAW_INTERVAL_MS = 50
 
 function isMainRenderGpuPath() {
   return !!fractal?._willUseGpuForCurrentRender?.()
+}
+
+function getMainGpuRenderScreenForState(renderer) {
+  const screens = renderer?.offscreens || []
+  const finalScreen = screens[screens.length - 1]
+  if (
+    !renderer?.currentInteractionGpuRedraw ||
+    renderer.fractalType !== 'mandelbrot' ||
+    !fullResUsesPhysicalPixels()
+  ) {
+    return finalScreen
+  }
+
+  const targetScale = Math.max(2, getWindowDevicePixelRatio())
+  let selected = finalScreen
+  let selectedScore = Number.POSITIVE_INFINITY
+  for (const screen of screens) {
+    if (!screen || screen.scale <= 1) continue
+    const score = Math.abs(screen.scale - targetScale)
+    if (score < selectedScore || (score === selectedScore && screen.scale < selected.scale)) {
+      selected = screen
+      selectedScore = score
+    }
+  }
+  return selected || finalScreen
 }
 
 function cancelActiveMainRender() {
@@ -5229,6 +5259,7 @@ function clearPendingInteractiveRedrawState() {
     gpuInteractiveRedrawTimer = null
   }
   gpuInteractiveRedrawPending = false
+  gpuInteractiveNeedsFinalRedraw = false
   pendingInteractivePinchView = null
   pendingInteractivePanDx = 0
   pendingInteractivePanDy = 0
@@ -5293,11 +5324,12 @@ function commitPendingInteractivePan() {
   return true
 }
 
-function startGpuInteractiveRedrawNow() {
+function startGpuInteractiveRedrawNow(options = {}) {
   if (!isMainRenderGpuPath()) {
     clearPendingInteractiveRedrawState()
     return
   }
+  const finalRedraw = options.final === true
   if (pendingInteractivePinchView) {
     fractal.setZoom(pendingInteractivePinchView.zoom)
     fractal.setCenter(pendingInteractivePinchView.center)
@@ -5309,7 +5341,8 @@ function startGpuInteractiveRedrawNow() {
   }
   resetPendingInteractiveTransform()
   lastGpuInteractiveRedrawAt = performance.now()
-  fractal.interactiveGpuRedraw = true
+  fractal.interactiveGpuRedraw = !finalRedraw
+  gpuInteractiveNeedsFinalRedraw = !finalRedraw
   cancelActiveMainRender()
   redraw(false, 0)
 }
@@ -5336,15 +5369,16 @@ function flushGpuInteractiveRedraw() {
     clearTimeout(gpuInteractiveRedrawTimer)
     gpuInteractiveRedrawTimer = null
   }
-  if (!gpuInteractiveRedrawPending && !hasPendingInteractiveView() && !hasPendingInteractiveTransform()) return
+  if (
+    !gpuInteractiveRedrawPending &&
+    !gpuInteractiveNeedsFinalRedraw &&
+    !hasPendingInteractiveView() &&
+    !hasPendingInteractiveTransform()
+  ) {
+    return
+  }
   gpuInteractiveRedrawPending = false
-  startGpuInteractiveRedrawNow()
-}
-
-function maybeStartInteractivePanGpuRedraw() {
-  if (performance.now() - lastGpuInteractiveRedrawAt < GPU_INTERACTIVE_REDRAW_INTERVAL_MS) return false
-  startGpuInteractiveRedrawNow()
-  return true
+  startGpuInteractiveRedrawNow({ final: true })
 }
 
 function zoomWithFactor(factor, cooldown, options = {}) {
@@ -6533,7 +6567,7 @@ function onMouseMove(evt) {
       panCanvas(dx, dy)
       dragStart = [lastX, lastY]
       _orbitPinDragged = true
-      maybeStartInteractivePanGpuRedraw()
+      scheduleGpuInteractiveRedraw()
       if (juliaState.active) redrawJulia()
     } else {
       applyPixelDeltaToCenter(dx, dy)
