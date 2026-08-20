@@ -467,10 +467,6 @@ function parseExpression(expr) {
   // power 処理は convertGenericExpression 側で行う
   code = code.replace(/\bc\b/g, '[cReal, cImag]')
 
-  // Re/Im の絶対値を先に処理する（後で Re/Im 単独を処理するため）
-  code = code.replace(/\|Re\(([^)]+)\)\|/g, '[Math.abs($1[0]), 0]')
-  code = code.replace(/\|Im\(([^)]+)\)\|/g, '[Math.abs($1[1]), 0]')
-
   // 新しい関数: sqrt, log, ln を扱う
   // ネストした括弧や引数を正しく処理するためにスキャナベースの置換器を使う
   // これにより正規表現だけでは対応できないケースを避ける
@@ -510,7 +506,7 @@ function parseExpression(expr) {
         continue
       }
       const inner = str.substring(start, end).trim()
-      const converted = isSimpleExpression(inner) ? inner : convertGenericExpression(inner)
+      const converted = convertGenericExpression(inner)
       const replacement = replacer(converted)
       str = str.substring(0, idx) + replacement + str.substring(end + 1)
       i = idx + replacement.length
@@ -934,30 +930,4 @@ function matchAndCompilePattern(normalized) {
     default:
       return null
   }
-}
-
-/**
- * 式が単純で複素変換を必要としないか判定する
- */
-function isSimpleExpression(expr) {
-  const trimmed = expr.trim()
-  if (/^[zc]$/.test(trimmed))
-    // 変数: z, c
-    return true
-  if (/^-?\d+(\.\d+)?$/.test(trimmed))
-    // 数字
-    return true
-  if (/^(pi|e)$/.test(trimmed))
-    // 定数: pi, e
-    return true
-  if (/^[zc]\s*[+\-*/]\s*[zc]$/.test(trimmed))
-    // 簡単な算術: z + c, z * 2, 2 * z, z + pi, pi + z など
-    return true
-  if (/^[zc]\s*[+\-*/]\s*\d+(\.\d+)?$/.test(trimmed)) return true
-  if (/^\d+(\.\d+)?\s*[+\-*/]\s*[zc]$/.test(trimmed)) return true
-  if (/^[zc]\s*[+\-*/]\s*(pi|e)$/.test(trimmed)) return true
-  if (/^(pi|e)\s*[+\-*/]\s*[zc]$/.test(trimmed)) return true
-  if (/^(pi|e)\s*[+\-*/]\s*\d+(\.\d+)?$/.test(trimmed)) return true
-  if (/^\d+(\.\d+)?\s*[+\-*/]\s*(pi|e)$/.test(trimmed)) return true
-  return false
 }

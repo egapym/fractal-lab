@@ -113,6 +113,12 @@ async function main() {
   // include a couple of expressions that previously triggered GPU bugs
   results.push(testRenderability('sin(Re(z)) + i*cos(Im(z)) + c'))
   results.push(testRenderability('Re(sin(z)) + i*Im(cos(z)) + c'))
+  results.push(testRenderability('Re(z+1) + c'))
+  results.push(testRenderability('Im(z+1) + c'))
+  results.push(testRenderability('Re(z+1) + i*Im(z+c) + c'))
+  results.push(testRenderability('|Re(z+1)| + i*|Im(z+c)| + c'))
+  results.push(testRenderability('sin(z+1) + c'))
+  results.push(testRenderability('sqrt(z+1) + c'))
 
   for (const preset of functionPresets) {
     const expr = preset.expr || preset
@@ -140,6 +146,12 @@ async function main() {
   const rendersCount = results.filter(r => r.renders).length
   const total = results.length
   console.log(`\ncompiled:${compiledCount}/${total}, renders:${rendersCount}/${total}`)
+
+  const failures = results.filter(r => !r.compiled || !r.renders || !r.wgslValid)
+  if (failures.length > 0) {
+    console.error(`\nFAILED:${failures.length}/${total}`)
+    process.exitCode = 1
+  }
 }
 
 if (
