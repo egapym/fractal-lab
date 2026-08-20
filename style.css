@@ -453,6 +453,10 @@ footer {
     min-width: 0;
 }
 
+#settings .settings-jump-control {
+    flex: 1 1 auto;
+}
+
 /* フルスクリーン時は入力欄を半透明背景でも読みやすくする */
 #settings.fullscreen input[type="text"],
 #settings.fullscreen input[type="number"],
@@ -570,19 +574,25 @@ footer {
     }
 
     #settings .settings-inline-controls {
-        flex-wrap: wrap;
+        display: grid !important;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        align-items: center;
     }
 
     #settings .settings-jump-control {
-        flex: 1 1 100%;
+        grid-column: 1 / span 2;
+        max-width: none;
     }
 
     #settings .settings-animation-control {
-        flex: 1 1 auto;
+        grid-column: 3;
+        min-width: 0;
     }
 
     #settings .settings-inline-stop {
-        margin-left: auto;
+        grid-column: 4;
+        width: 100%;
+        margin-left: 0;
     }
 }
 
