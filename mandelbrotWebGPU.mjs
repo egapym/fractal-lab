@@ -626,43 +626,26 @@ class MandelbrotPipeline {
     const maxWorkersCount = data.animationQuick ? 1 << 16 : 2 ** 18
     const indices = data.indices
     const remainingIndices = []
-    let values = null
-    let smooth = null
-    let signs = null
-    let zreal = null
-    let zimag = null
     for (let i = 0; i < indices.length; i += maxWorkersCount) {
       const chunk = indices.slice(i, i + maxWorkersCount)
       const remainingChunk = await this.doRun(data, chunk)
       // here we can already start calculating a new reference point in another thread if needed
-      for (const element of remainingChunk.indices) {
+      for (const element of remainingChunk) {
         remainingIndices.push(element)
       }
-      // console.log(`Chunk of size ${chunk.length} took ${(end - start).toFixed(1)}ms`)
-      values = remainingChunk.values
-      smooth = remainingChunk.smooth
-      signs = remainingChunk.signs
-      zreal = remainingChunk.zreal
-      zimag = remainingChunk.zimag
       if (this.ctx.shouldStop()) {
+        const result = await this.readResults(data)
         await this.finish()
         return {
           indices: [],
-          values: values || new Int32Array(data.w * data.h),
-          smooth: smooth || (data.doSmooth ? new Uint8ClampedArray(data.w * data.h) : null),
-          signs: signs || new Int8Array(data.w * data.h),
-          zreal: zreal || new Float32Array(data.w * data.h),
-          zimag: zimag || new Float32Array(data.w * data.h),
+          ...result,
         }
       }
     }
+    const result = await this.readResults(data)
     return {
       indices: new Uint32Array(remainingIndices),
-      values,
-      smooth,
-      signs,
-      zreal,
-      zimag,
+      ...result,
     }
   }
 
@@ -712,15 +695,6 @@ class MandelbrotPipeline {
     pass.end()
 
     encoder.copyBufferToBuffer(this.indexBuffer, 0, this.resultIndexBuffer, 0, indices.length * 4)
-    encoder.copyBufferToBuffer(this.valuesBuffer, 0, this.resultValuesBuffer, 0, this.resultValuesBuffer.size)
-    encoder.copyBufferToBuffer(this.signsBuffer, 0, this.resultSignsBuffer, 0, this.resultSignsBuffer.size)
-    encoder.copyBufferToBuffer(this.zrealBuffer, 0, this.resultZrealBuffer, 0, this.resultZrealBuffer.size)
-    encoder.copyBufferToBuffer(this.zimagBuffer, 0, this.resultZimagBuffer, 0, this.resultZimagBuffer.size)
-
-    if (data.doSmooth) {
-      encoder.copyBufferToBuffer(this.smoothBuffer, 0, this.resultSmoothBuffer, 0, this.resultSmoothBuffer.size)
-    }
-
     const commandBuffer = encoder.finish()
     device.queue.submit([commandBuffer])
 
@@ -733,6 +707,24 @@ class MandelbrotPipeline {
       }
     }
     this.resultIndexBuffer.unmap()
+
+    return remainingIndices
+  }
+
+  async readResults(data) {
+    const device = await this.devicePromise
+    const encoder = device.createCommandEncoder({
+      label: 'mandelbrot result encoder',
+    })
+    encoder.copyBufferToBuffer(this.valuesBuffer, 0, this.resultValuesBuffer, 0, this.resultValuesBuffer.size)
+    encoder.copyBufferToBuffer(this.signsBuffer, 0, this.resultSignsBuffer, 0, this.resultSignsBuffer.size)
+    encoder.copyBufferToBuffer(this.zrealBuffer, 0, this.resultZrealBuffer, 0, this.resultZrealBuffer.size)
+    encoder.copyBufferToBuffer(this.zimagBuffer, 0, this.resultZimagBuffer, 0, this.resultZimagBuffer.size)
+
+    if (data.doSmooth) {
+      encoder.copyBufferToBuffer(this.smoothBuffer, 0, this.resultSmoothBuffer, 0, this.resultSmoothBuffer.size)
+    }
+    device.queue.submit([encoder.finish()])
 
     const values = new Int32Array(this.resultValuesBuffer.size / 4)
     await this.resultValuesBuffer.mapAsync(GPUMapMode.READ)
@@ -763,7 +755,6 @@ class MandelbrotPipeline {
     this.resultZimagBuffer.unmap()
 
     return {
-      indices: remainingIndices,
       values,
       smooth,
       signs,
@@ -785,6 +776,12 @@ class MandelbrotPipeline {
     this.signsBuffer.destroy()
     this.zrealBuffer.destroy()
     this.zimagBuffer.destroy()
+    this.resultIndexBuffer.destroy()
+    this.resultValuesBuffer.destroy()
+    this.resultSmoothBuffer.destroy()
+    this.resultSignsBuffer.destroy()
+    this.resultZrealBuffer.destroy()
+    this.resultZimagBuffer.destroy()
   }
 
   async getPipeline(device, workgroupSize, smooth, bailout, supersampling, fractalType = 'mandelbrot') {

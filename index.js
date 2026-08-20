@@ -313,6 +313,9 @@ const MAX_PIXEL_SIZE = 16
 const MIN_ZOOM = fxp.fromNumber(0.1) // スクロールで 0.1（1/10）まで縮小できる
 const NON_MANDELBROT_CPU_MAX_ZOOM = fxp.fromNumber(1.0e14)
 const NON_MANDELBROT_GPU_MAX_ZOOM = fxp.fromNumber(1.0e5)
+// The direct float32 GPU renderer is substantially faster at ordinary zooms.
+// Beyond this point Mandelbrot needs the perturbation renderer to retain detail.
+const MANDELBROT_DIRECT_GPU_MAX_ZOOM = NON_MANDELBROT_GPU_MAX_ZOOM
 const ORBIT_TRAP_CPU_MAX_ZOOM = fxp.fromNumber(2.2e13)
 
 // アニメーションと時間まわりの定数
@@ -388,6 +391,29 @@ function clampZoomForState(zoom, fractalType, renderingWithGpu, options = {}) {
     normalizedZoom = normalizedZoom.max(MIN_ZOOM.withScale(scale))
   }
   return limit && normalizedZoom.bigInt > limit.bigInt ? limit : normalizedZoom
+}
+
+function shouldUseDirectMandelbrotGpu(renderer) {
+  if (renderer?.fractalType !== 'mandelbrot' || !renderer?.mandelbrotCustomGpu?.available) return false
+  if (!renderer.zoom.withScale(MANDELBROT_DIRECT_GPU_MAX_ZOOM.scale).leq(MANDELBROT_DIRECT_GPU_MAX_ZOOM)) {
+    return false
+  }
+
+  const zoom = renderer.zoom.toNumber()
+  const width = renderer.width || renderer.canvas?.width || 0
+  const height = renderer.height || renderer.canvas?.height || 0
+  if (!Number.isFinite(zoom) || zoom <= 0 || width <= 0 || height <= 0) return false
+
+  // The direct shader receives coordinates as float32. Use it only while one-pixel
+  // steps remain distinguishable across the whole viewport; otherwise retain the
+  // perturbation renderer so a faster frame never costs Mandelbrot detail.
+  const pixelStep = 4 / (zoom * width)
+  const halfWidth = 2 / zoom
+  const halfHeight = (2 * height) / (zoom * width)
+  const centerRe = renderer.center[0].toNumber()
+  const centerIm = renderer.center[1].toNumber()
+  const edges = [centerRe - halfWidth, centerRe + halfWidth, centerIm - halfHeight, centerIm + halfHeight]
+  return edges.every((edge) => Math.fround(edge + pixelStep) !== Math.fround(edge))
 }
 
 function getBooleanQueryParam(key, defaultValue = false) {
@@ -999,18 +1025,25 @@ class Mandelbrot {
       return
     }
 
-    // Mandelbrot の GPU 経路
+    // Mandelbrot の GPU 経路。
+    // 通常ズームでは1回の2D dispatchで済む直接計算を使う。深いズームだけ、
+    // 高精度を維持できる摂動法へ切り替える。
     // Orbit trap パレット (requiresCpu=true) はCPU計算が必要なため GPU パスをスキップする。
     if (
       this.useGpu &&
       !this.paletteComponent?.palette?.requiresCpu &&
       this.fractalType === 'mandelbrot' &&
-      this.mandelbrotGpu?.available &&
       this.offscreens &&
       this.offscreens.length > 0
     ) {
-      this.startNextGpuJob(resetCaches)
-      return
+      if (shouldUseDirectMandelbrotGpu(this)) {
+        this.startNextCustomGpuJob(resetCaches)
+        return
+      }
+      if (this.mandelbrotGpu?.available) {
+        this.startNextGpuJob(resetCaches)
+        return
+      }
     }
     // カスタムフラクタルの GPU 経路
     // Orbit trap パレット (requiresCpu=true) はCPU計算が必要なため GPU パスをスキップする。
@@ -1361,7 +1394,12 @@ class Mandelbrot {
     this._revokeJobToken()
     this._createJobToken()
 
-    const screen = this.offscreens[this.offscreens.length - 1]
+    // Standard Mandelbrot also uses this direct renderer at ordinary zooms.
+    // Preserve its lightweight offscreen during fullscreen/Hi DPI interaction.
+    const screen =
+      this.fractalType === 'mandelbrot'
+        ? getMainGpuRenderScreenForState(this)
+        : this.offscreens[this.offscreens.length - 1]
     this.activeGpuScreen = screen
     const w = screen.buffer.width
     const h = screen.buffer.height
@@ -5087,6 +5125,7 @@ let juliaDragStart = null
 let juliaLastTouchDistance = null
 let juliaLastTouchCenter = null
 let gpuInteractiveRedrawTimer = null
+let gpuInteractiveFinalizeTimer = null
 let gpuInteractiveRedrawPending = false
 let gpuInteractiveNeedsFinalRedraw = false
 let lastGpuInteractiveRedrawAt = 0
@@ -5113,10 +5152,15 @@ let _orbitPinDragged = false
 let _juliaPinDragged = false
 const TOUCH_CLICK_SUPPRESS_MS = 700
 const GPU_INTERACTIVE_REDRAW_INTERVAL_MS = 50
+const GPU_WHEEL_FINAL_REDRAW_DELAY_MS = 150
 // let dragged = false
 
 function isMainRenderGpuPath() {
   return !!fractal?._willUseGpuForCurrentRender?.()
+}
+
+function shouldRedrawMainGpuDuringInteraction() {
+  return fractal?.fractalType !== 'mandelbrot' || shouldUseDirectMandelbrotGpu(fractal)
 }
 
 function getMainGpuRenderScreenForState(renderer) {
@@ -5258,6 +5302,10 @@ function clearPendingInteractiveRedrawState() {
     clearTimeout(gpuInteractiveRedrawTimer)
     gpuInteractiveRedrawTimer = null
   }
+  if (gpuInteractiveFinalizeTimer != null) {
+    clearTimeout(gpuInteractiveFinalizeTimer)
+    gpuInteractiveFinalizeTimer = null
+  }
   gpuInteractiveRedrawPending = false
   gpuInteractiveNeedsFinalRedraw = false
   pendingInteractivePinchView = null
@@ -5348,7 +5396,17 @@ function startGpuInteractiveRedrawNow(options = {}) {
 }
 
 function scheduleGpuInteractiveRedraw() {
+  // A new interaction supersedes a pending wheel-idle completion. Wheel input
+  // schedules a fresh completion immediately after this function returns.
+  if (gpuInteractiveFinalizeTimer != null) {
+    clearTimeout(gpuInteractiveFinalizeTimer)
+    gpuInteractiveFinalizeTimer = null
+  }
   gpuInteractiveRedrawPending = true
+  // Deep-zoom Mandelbrot uses the perturbation pipeline. Keep the transformed
+  // previous frame responsive, but defer that expensive GPU recomputation until
+  // the drag/pinch ends or wheel input becomes idle.
+  if (!shouldRedrawMainGpuDuringInteraction()) return
   const now = performance.now()
   const wait = Math.max(0, GPU_INTERACTIVE_REDRAW_INTERVAL_MS - (now - lastGpuInteractiveRedrawAt))
   if (gpuInteractiveRedrawTimer != null) return
@@ -5360,6 +5418,14 @@ function scheduleGpuInteractiveRedraw() {
   }, wait)
 }
 
+function scheduleGpuInteractiveFinalRedraw() {
+  if (gpuInteractiveFinalizeTimer != null) clearTimeout(gpuInteractiveFinalizeTimer)
+  gpuInteractiveFinalizeTimer = setTimeout(() => {
+    gpuInteractiveFinalizeTimer = null
+    flushGpuInteractiveRedraw()
+  }, GPU_WHEEL_FINAL_REDRAW_DELAY_MS)
+}
+
 function flushGpuInteractiveRedraw() {
   if (!isMainRenderGpuPath()) {
     clearPendingInteractiveRedrawState()
@@ -5368,6 +5434,10 @@ function flushGpuInteractiveRedraw() {
   if (gpuInteractiveRedrawTimer != null) {
     clearTimeout(gpuInteractiveRedrawTimer)
     gpuInteractiveRedrawTimer = null
+  }
+  if (gpuInteractiveFinalizeTimer != null) {
+    clearTimeout(gpuInteractiveFinalizeTimer)
+    gpuInteractiveFinalizeTimer = null
   }
   if (
     !gpuInteractiveRedrawPending &&
@@ -5471,7 +5541,10 @@ function handleScroll(evt) {
 
   updateMousePos(evt)
   const delta = getWheelZoomDelta(evt)
-  if (delta) zoomWithClicks(-delta, 0, { gesture: evt.type === 'wheel' })
+  if (delta) {
+    zoomWithClicks(-delta, 0, { gesture: evt.type === 'wheel' })
+    if (evt.type === 'wheel' && isMainRenderGpuPath()) scheduleGpuInteractiveFinalRedraw()
+  }
   evt.preventDefault()
 }
 
