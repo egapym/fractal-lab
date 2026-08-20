@@ -5125,7 +5125,7 @@ function getMainGpuRenderScreenForState(renderer) {
   if (
     !renderer?.currentInteractionGpuRedraw ||
     renderer.fractalType !== 'mandelbrot' ||
-    !fullResUsesPhysicalPixels()
+    (!fullResUsesPhysicalPixels() && !document.fullscreenElement)
   ) {
     return finalScreen
   }
