@@ -1459,7 +1459,7 @@ class Mandelbrot {
     }
     if (this.activeGpuViewRevision !== this.viewRevision) {
       if (answer.isFinished) {
-        this.progress.finish()
+        this.progress.finish({ showRenderTime: false })
       }
       return
     }
@@ -1483,7 +1483,7 @@ class Mandelbrot {
     const screen = this.activeGpuScreen || this.offscreens[this.offscreens.length - 1]
     if (answer.rgba) {
       if (answer.isFinished) {
-        this.progress.finish()
+        this.progress.finish({ showRenderTime: !this.currentInteractionGpuRedraw })
       } else {
         const progress = Math.round((this.progress.tasks - this.progress.done) / 2)
         this.progress.update(progress)
@@ -1518,7 +1518,7 @@ class Mandelbrot {
 
     if (answer.isFinished) {
       // 完了時は進捗を確実に 100% にする
-      this.progress.finish()
+      this.progress.finish({ showRenderTime: !this.currentInteractionGpuRedraw })
     } else {
       // 中間更新では残り作業の半分を目安に進捗を進める
       const progress = Math.round((this.progress.tasks - this.progress.done) / 2)
@@ -2246,7 +2246,8 @@ class ProgressMonitor {
     }
   }
 
-  finish() {
+  finish(options = {}) {
+    const showRenderTime = options.showRenderTime !== false
     this.done = this.tasks
     this._cancelPendingShow()
     if (!this.completed) {
@@ -2255,7 +2256,7 @@ class ProgressMonitor {
     }
     // 完了後に描画時間を表示し、進捗表示を隠す
     const jobTime = performance.now() - this.startTime
-    if (this.timeElementId) {
+    if (showRenderTime && this.timeElementId) {
       const renderTimeElement = document.getElementById(this.timeElementId)
       if (renderTimeElement) {
         renderTimeElement.innerText = `${jobTime.toFixed(0)}ms`
@@ -5196,7 +5197,7 @@ function cancelActiveMainRender() {
     if (fractal.mandelbrotGpu) fractal.mandelbrotGpu.newTask = null
     if (fractal.mandelbrotCustomGpu) fractal.mandelbrotCustomGpu.newTask = null
     if (fractal.orbitTrapGpu) fractal.orbitTrapGpu.newTask = null
-    if (hadActiveJob) fractal.progress?.finish?.()
+    if (hadActiveJob) fractal.progress?.finish?.({ showRenderTime: false })
   } catch (e) {
     console.warn('Error canceling active fractal render:', e?.message ? e.message : e)
   }
@@ -5211,7 +5212,7 @@ function cancelActiveJuliaRender() {
     if (Array.isArray(renderer.taskqueue)) renderer.taskqueue.length = 0
     if (renderer.juliaGpu) renderer.juliaGpu.newTask = null
     if (renderer.orbitTrapGpu) renderer.orbitTrapGpu.newTask = null
-    if (hadActiveJob) renderer.progress?.finish?.()
+    if (hadActiveJob) renderer.progress?.finish?.({ showRenderTime: false })
   } catch (e) {
     console.warn('Error canceling active Julia render:', e?.message ? e.message : e)
   }
