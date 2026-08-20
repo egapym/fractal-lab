@@ -520,8 +520,8 @@ function parseExpression(expr) {
   // Re/Im は実数スカラーとして扱う。
   // 例: Re(z) + i*Im(z) が元の z と同じ向きになるようにする。
   const fnReplacers = [
-    ['Re', (converted) => `[${converted}[0], 0]`],
-    ['Im', (converted) => `[${converted}[1], 0]`],
+    ['Re', (converted) => `[complexRe(${converted}), 0]`],
+    ['Im', (converted) => `[complexIm(${converted}), 0]`],
     ['conj', (converted) => `complexConj(${converted})`],
     ['exp', (converted) => `complexExp(${converted})`],
     ['sin', (converted) => `complexSin(${converted})`],

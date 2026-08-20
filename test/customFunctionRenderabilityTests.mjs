@@ -9,13 +9,36 @@
 
 import { compileIterationFunction, getParsedExpression } from '../customFunctionParser.mjs'
 import { functionPresets } from '../functionPresets.mjs'
-import { jsExprToWGSL } from '../wgslCompiler.mjs'
+import { jsExprToWGSL_safe } from '../wgslCompiler.mjs'
 
 function linspace(a, b, n) {
   const out = []
   if (n === 1) return [(a + b) / 2]
   for (let i = 0; i < n; i++) out.push(a + (i * (b - a)) / (n - 1))
   return out
+}
+
+function hasBalancedDelimiters(expr) {
+  const stack = []
+  const pairs = new Map([
+    [')', '('],
+    [']', '['],
+    ['}', '{'],
+  ])
+  for (const ch of expr) {
+    if (ch === '(' || ch === '[' || ch === '{') {
+      stack.push(ch)
+    } else if (pairs.has(ch)) {
+      if (stack.pop() !== pairs.get(ch)) return false
+    }
+  }
+  return stack.length === 0
+}
+
+function hasVec2ResultShape(expr) {
+  if (!hasBalancedDelimiters(expr)) return false
+  const trimmed = expr.trim()
+  return /^vec2<f32>\s*\(/.test(trimmed) || /^select\s*\(/.test(trimmed)
 }
 
 function testRenderability(expr, opts = {}) {
@@ -86,11 +109,14 @@ function testRenderability(expr, opts = {}) {
   let wgslValid = true
   let wgslError = null
   try {
-    const wgsl = jsExprToWGSL(getParsedExpression(normalizedExpr))
+    const wgsl = jsExprToWGSL_safe(getParsedExpression(normalizedExpr))
     // look for adjacent tokens that would indicate a missing operator
     if (/\)\s+\(/.test(wgsl)) {
       wgslValid = false
       wgslError = 'missing operator between subexpressions'
+    } else if (!hasVec2ResultShape(wgsl)) {
+      wgslValid = false
+      wgslError = 'malformed vec2 expression'
     }
   } catch (e) {
     wgslValid = false

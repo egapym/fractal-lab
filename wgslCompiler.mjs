@@ -285,6 +285,27 @@ export const SAFE_EPS = 1e-12
 function astToWGSL(node, tokensTable) {
   if (!node) return { expr: '', kind: 'scalar' }
 
+  function getVec2Args(expr) {
+    const s = typeof expr === 'string' ? expr.trim() : ''
+    if (!s.startsWith('vec2<f32>(')) return null
+
+    const start = 'vec2<f32>('.length
+    let depth = 0
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i]
+      if (ch === '(' || ch === '[') depth++
+      else if (ch === ')' || ch === ']') {
+        if (depth === 0) {
+          const inner = s.slice(start, i)
+          const parts = splitTopLevelArgs(inner)
+          return parts.length === 2 ? parts : null
+        }
+        depth--
+      }
+    }
+    return null
+  }
+
   function comp(n, which) {
     if (!n) return which === 'x' ? '0.0' : '0.0'
     if (n.kind === 'vec2') {
@@ -306,19 +327,17 @@ function astToWGSL(node, tokensTable) {
       if (yv === '0.0' || yv === '0') return (tn.x || '0.0').toString().trim()
       // expr が vec2<f32>(A, B) 形式なら確認する
       // 第 2 成分が本当に 0 のときだけ純粋な実数として扱う
-      if (typeof tn.expr === 'string') {
-        const m = tn.expr.match(/^vec2<f32>\(\s*([^,]+),\s*([^)]+)\)/)
-        if (m?.[1] && m[2]) {
-          const second = m[2].trim()
-          if (second === '0.0' || second === '0') return m[1].trim()
-        }
+      const parts = getVec2Args(tn.expr)
+      if (parts) {
+        const second = parts[1].trim()
+        if (second === '0.0' || second === '0') return parts[0].trim()
       }
     }
     if (typeof tn.expr === 'string') {
-      const m = tn.expr.match(/^vec2<f32>\(\s*([^,]+),\s*([^)]+)\)/)
-      if (m?.[1] && m[2]) {
-        const second = m[2].trim()
-        if (second === '0.0' || second === '0') return m[1].trim()
+      const parts = getVec2Args(tn.expr)
+      if (parts) {
+        const second = parts[1].trim()
+        if (second === '0.0' || second === '0') return parts[0].trim()
       }
     }
     return null
@@ -331,11 +350,9 @@ function astToWGSL(node, tokensTable) {
       // 実部が文字どおり 0 なら虚部を返す
       if (xv === '0.0' || xv === '0') return String(tn.y || '0.0').trim()
       // expr が vec2<f32>(A, B) 形式か確認する
-      if (typeof tn.expr === 'string') {
-        const m = tn.expr.match(/^vec2<f32>\(\s*([^,]+),\s*([^)]+)\)/)
-        if (m?.[1] && m[2]) {
-          if (m[1].trim() === '0.0' || m[1].trim() === '0') return m[2].trim()
-        }
+      const parts = getVec2Args(tn.expr)
+      if (parts) {
+        if (parts[0].trim() === '0.0' || parts[0].trim() === '0') return parts[1].trim()
       }
     }
     return null
@@ -373,10 +390,10 @@ function astToWGSL(node, tokensTable) {
       s = s.trim()
       // 成分が vec2 リテラルなら内側のスカラーだけを取り出し、
       // vec2 の入れ子を作らないようにする
-      const vec2m = s.match(/^vec2<f32>\(\s*([^,]+),\s*([^)]+)\)$/)
-      if (vec2m) {
+      const vec2Args = getVec2Args(s)
+      if (vec2Args) {
         // ここでは x 側として扱う前提で第 1 成分を返す
-        return vec2m[1].trim()
+        return vec2Args[0].trim()
       }
       // 末尾の ' + 0.0' や先頭の '0.0 + ' を消す
       s = s.replace(/\+\s*0(?:\.0+)?\s*$/, '')
@@ -522,6 +539,14 @@ function astToWGSL(node, tokensTable) {
           { expr: comp(a, 'x'), kind: 'scalar' },
           { expr: `-(${comp(a, 'y')})`, kind: 'scalar' },
         )
+      }
+      case 'complexRe': {
+        const a = argNodes[0]
+        return { expr: comp(a, 'x'), kind: 'scalar' }
+      }
+      case 'complexIm': {
+        const a = argNodes[0]
+        return { expr: comp(a, 'y'), kind: 'scalar' }
       }
       case 'complexAbs': {
         const a = argNodes[0]
@@ -1834,6 +1859,8 @@ function validateVariables(expr) {
     'complexSin',
     'complexCos',
     'complexTan',
+    'complexRe',
+    'complexIm',
     'complexSinh',
     'complexCosh',
     'complexTanh',
